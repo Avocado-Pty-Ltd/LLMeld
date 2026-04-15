@@ -22,6 +22,10 @@ export interface StepResult {
   confidence: 'high' | 'medium' | 'low';
   issues: string[];
   tokens_used: number;
+  /** Tool calls made during execution — preserved for context sharing */
+  tool_log?: string[];
+  /** Files that were read or written during execution */
+  files_touched?: string[];
 }
 
 export type ProgressEvent =

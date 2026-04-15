@@ -77,7 +77,7 @@ export class OrchestrationLoop {
 
     // Execute steps
     const results: Map<string, StepResult> = new Map();
-    const completedOutputs: Array<{ stepId: string; output: string }> = [];
+    const completedOutputs: Array<{ stepId: string; output: string; confidence?: string; tool_log?: string[]; files_touched?: string[] }> = [];
     const totalSteps = sortedSteps.length;
 
     for (let stepIndex = 0; stepIndex < sortedSteps.length; stepIndex++) {
@@ -87,7 +87,7 @@ export class OrchestrationLoop {
       const stepStart = Date.now();
       const executor = step.allow_local ? this.executor : (this.fallbackExecutor ?? this.executor);
 
-      let result: StepResult;
+      let result: StepResult | undefined;
       let passed = false;
       let escalated = false;
       let attempts = 0;
@@ -107,32 +107,45 @@ export class OrchestrationLoop {
             break;
           }
 
-          // Last retry — try escalation
+          // Last retry — try escalation with failure context
           if (attempt === this.routingConfig.max_retries) {
             if (step.escalate_if_fails && this.fallbackExecutor && executor !== this.fallbackExecutor) {
               if (!this.routingConfig.privacy_mode) {
                 emit({ stage: 'step_escalated', stepId: step.id });
+                const failCtx = {
+                  reason: verification.reasons.join('; ') || 'Verification failed',
+                  toolLog: result.tool_log ?? [],
+                  partialOutput: result.output ?? '',
+                };
                 result = await this.fallbackExecutor.execute(
                   step,
                   plan.context_for_executor,
                   completedOutputs,
                   onProgress,
+                  failCtx,
                 );
                 escalated = true;
-                passed = true;
+                const escalatedVerification = verifyStep(step, result);
+                passed = escalatedVerification.passed;
               }
             }
           }
         } catch (err) {
-          // Execution error — try escalation
+          // Execution error — try escalation with error context
           if (step.escalate_if_fails && this.fallbackExecutor && !this.routingConfig.privacy_mode) {
             emit({ stage: 'step_escalated', stepId: step.id });
+            const failCtx = {
+              reason: err instanceof Error ? err.message : String(err),
+              toolLog: result?.tool_log ?? [],
+              partialOutput: result?.output ?? '',
+            };
             try {
               result = await this.fallbackExecutor.execute(
                 step,
                 plan.context_for_executor,
                 completedOutputs,
                 onProgress,
+                failCtx,
               );
               escalated = true;
               passed = true;
@@ -156,7 +169,13 @@ export class OrchestrationLoop {
       emit({ stage: 'step_complete', stepId: step.id, passed, tokens: result.tokens_used, elapsed_ms: stepElapsed });
 
       results.set(step.id, result);
-      completedOutputs.push({ stepId: step.id, output: result.output });
+      completedOutputs.push({
+        stepId: step.id,
+        output: result.output,
+        confidence: result.confidence,
+        tool_log: result.tool_log,
+        files_touched: result.files_touched,
+      });
       trace.step_results.push({
         step_id: step.id,
         attempt: attempts,

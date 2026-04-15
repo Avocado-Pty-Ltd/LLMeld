@@ -69,8 +69,14 @@ function truncate(text: string): { output: string; truncated: boolean } {
   if (text.length <= MAX_OUTPUT_CHARS) {
     return { output: text, truncated: false };
   }
+  // Keep head + tail so the model sees both the beginning and end of output
+  const headSize = Math.floor(MAX_OUTPUT_CHARS * 0.7);
+  const tailSize = MAX_OUTPUT_CHARS - headSize - 100; // 100 chars for the separator
+  const head = text.slice(0, headSize);
+  const tail = text.slice(-tailSize);
+  const omitted = text.length - headSize - tailSize;
   return {
-    output: text.slice(0, MAX_OUTPUT_CHARS) + `\n\n[... truncated, ${text.length} chars total]`,
+    output: `${head}\n\n[... ${omitted} chars omitted (${text.length} total) ...]\n\n${tail}`,
     truncated: true,
   };
 }

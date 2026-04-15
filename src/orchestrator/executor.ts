@@ -29,8 +29,9 @@ export class Executor {
   async execute(
     step: PlanStep,
     contextForExecutor: string,
-    previousResults?: Array<{ stepId: string; output: string }>,
+    previousResults?: Array<{ stepId: string; output: string; confidence?: string; tool_log?: string[]; files_touched?: string[] }>,
     onProgress?: (event: ProgressEvent) => void,
+    failureContext?: { reason: string; toolLog: string[]; partialOutput: string },
   ): Promise<StepResult> {
     const emit = onProgress ?? (() => {});
 
@@ -43,10 +44,33 @@ export class Executor {
       );
       if (relevantResults.length > 0) {
         const prevContext = relevantResults
-          .map((r) => `[Output from ${r.stepId}]:\n${r.output}`)
+          .map((r) => {
+            let section = `[Output from ${r.stepId}]:\n${r.output}`;
+            if (r.files_touched?.length) {
+              section += `\nFiles touched: ${r.files_touched.join(', ')}`;
+            }
+            if (r.tool_log?.length) {
+              section += `\nTools used:\n${r.tool_log.join('\n')}`;
+            }
+            if (r.confidence && r.confidence !== 'high') {
+              section += `\nConfidence: ${r.confidence}`;
+            }
+            return section;
+          })
           .join('\n\n');
         instruction = `## Previous step outputs\n${prevContext}\n\n## Your task\n${instruction}`;
       }
+    }
+
+    // If this is an escalation from a failed executor, include what went wrong
+    let failureSection = '';
+    if (failureContext) {
+      failureSection = `\n\n## Previous attempt (failed)
+A previous model attempted this step and failed.
+**Reason:** ${failureContext.reason}
+${failureContext.toolLog.length > 0 ? `**Tools used:**\n${failureContext.toolLog.join('\n')}` : ''}
+${failureContext.partialOutput ? `**Partial output:**\n${failureContext.partialOutput.slice(0, 500)}` : ''}
+Learn from this failure — avoid repeating the same approach if it clearly didn't work.`;
     }
 
     const prompt = `## Background context
@@ -57,7 +81,7 @@ ${contextForExecutor}
 **Instruction:** ${instruction}
 
 ## Expected output
-${step.expected_output}`;
+${step.expected_output}${failureSection}`;
 
     const messages: NormalisedMessage[] = [
       { role: 'system', content: EXECUTOR_SYSTEM_PROMPT },
@@ -66,6 +90,7 @@ ${step.expected_output}`;
 
     let totalTokens = 0;
     const toolLog: string[] = [];
+    const filesTouched: Set<string> = new Set();
 
     for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
       const req: NormalisedLLMRequest = {
@@ -84,7 +109,7 @@ ${step.expected_output}`;
         const finalContent = toolLog.length > 0
           ? `${response.content}\n\n## Tool activity log\n${toolLog.join('\n')}`
           : response.content;
-        return this.parseResult(step.id, finalContent, totalTokens);
+        return this.parseResult(step.id, finalContent, totalTokens, toolLog, filesTouched);
       }
 
       // Model wants to call tools — add assistant message with tool_calls
@@ -119,6 +144,12 @@ ${step.expected_output}`;
         const result = await executeTool(tc.function.name, args);
         toolLog.push(`- ${tc.function.name}(${argsPreview}) → ${result.output.slice(0, 100)}${result.output.length > 100 ? '...' : ''}`);
 
+        // Track files touched for context sharing
+        if (tc.function.name === 'read_file' || tc.function.name === 'write_file') {
+          const path = String(args.path ?? '');
+          if (path) filesTouched.add(path);
+        }
+
         emit({
           stage: 'tool_result',
           stepId: step.id,
@@ -140,10 +171,18 @@ ${step.expected_output}`;
       step.id,
       lastAssistant?.content || '[Max tool iterations reached without final response]',
       totalTokens,
+      toolLog,
+      filesTouched,
     );
   }
 
-  private parseResult(stepId: string, content: string, tokensUsed: number): StepResult {
+  private parseResult(
+    stepId: string,
+    content: string,
+    tokensUsed: number,
+    toolLog?: string[],
+    filesTouched?: Set<string>,
+  ): StepResult {
     let confidence: StepResult['confidence'] = 'medium';
     let output = content;
 
@@ -164,6 +203,8 @@ ${step.expected_output}`;
       confidence,
       issues,
       tokens_used: tokensUsed,
+      tool_log: toolLog?.length ? toolLog : undefined,
+      files_touched: filesTouched?.size ? [...filesTouched] : undefined,
     };
   }
 }

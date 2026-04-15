@@ -78,23 +78,31 @@ export class Planner {
       throw new Error('No user message found in request');
     }
 
-    // Build a concise context summary from recent assistant messages (if any)
-    // so the planner knows what's already been discussed
-    const recentContext = req.messages
-      .filter((m) => m.role === 'assistant' && m.content)
-      .slice(-2)
-      .map((m) => m.content.slice(0, 300))
-      .join('\n');
+    // Build conversation context from recent messages (last 4 assistant + user pairs)
+    // so the planner understands what's already been discussed
+    const recentMessages = req.messages
+      .filter((m) => (m.role === 'assistant' || m.role === 'user') && m.content)
+      .slice(-6)  // Last 6 messages (roughly 3 turns)
+      .map((m) => {
+        const prefix = m.role === 'user' ? 'User' : 'Assistant';
+        return `${prefix}: ${m.content.slice(0, 800)}`;
+      })
+      .join('\n\n');
 
-    const userContent = recentContext
-      ? `## Recent conversation context\n${recentContext}\n\n## Current request\n${lastUserMsg.content}`
+    // Skip the last user message from recentMessages since we include it separately
+    const contextMessages = recentMessages
+      ? recentMessages.split('\n\n').slice(0, -1).join('\n\n')
+      : '';
+
+    const userContent = contextMessages
+      ? `## Recent conversation context\n${contextMessages}\n\n## Current request\n${lastUserMsg.content}`
       : lastUserMsg.content;
 
     // Gather local environment context so the planner knows where tools run
     const envContext = this.getEnvironmentContext();
 
     const messages = [
-      { role: 'system' as const, content: PLANNER_SYSTEM_PROMPT + envContext + (systemMsg ? `\n\n## Client system prompt\n${systemMsg.content.slice(0, 500)}` : '') },
+      { role: 'system' as const, content: PLANNER_SYSTEM_PROMPT + envContext + (systemMsg ? `\n\n## Client system prompt\n${systemMsg.content.slice(0, 1000)}` : '') },
       { role: 'user' as const, content: userContent },
     ];
 
