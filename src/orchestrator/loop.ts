@@ -1,7 +1,7 @@
 import type { CloudProvider } from '../providers/base.js';
 import type { NormalisedLLMRequest, NormalisedLLMResponse } from '../types/normalised.js';
 import type { RoutingConfig } from '../types/config.js';
-import type { ExecutionPlan, StepResult } from '../types/plan.js';
+import type { ExecutionPlan, StepResult, ProgressEvent } from '../types/plan.js';
 import { Planner } from './planner.js';
 import { Executor } from './executor.js';
 import { verifyStep } from './verifier.js';
@@ -39,15 +39,21 @@ export class OrchestrationLoop {
     }
   }
 
-  async execute(req: NormalisedLLMRequest): Promise<{
+  async execute(
+    req: NormalisedLLMRequest,
+    onProgress?: (event: ProgressEvent) => void,
+  ): Promise<{
     response: NormalisedLLMResponse;
     trace: OrchestrationTrace;
   }> {
+    const emit = onProgress ?? (() => {});
     const trace: OrchestrationTrace = {
       trace_id: uuidv4(),
       step_results: [],
       total_tokens: 0,
     };
+
+    emit({ stage: 'planning', message: 'Decomposing task into steps...' });
 
     let plan: ExecutionPlan;
     try {
@@ -67,12 +73,18 @@ export class OrchestrationLoop {
 
     // Topological sort of steps by depends_on
     const sortedSteps = this.topologicalSort(plan.steps);
+    emit({ stage: 'plan_ready', plan });
 
     // Execute steps
     const results: Map<string, StepResult> = new Map();
     const completedOutputs: Array<{ stepId: string; output: string }> = [];
+    const totalSteps = sortedSteps.length;
 
-    for (const step of sortedSteps) {
+    for (let stepIndex = 0; stepIndex < sortedSteps.length; stepIndex++) {
+      const step = sortedSteps[stepIndex];
+      emit({ stage: 'step_start', stepIndex, totalSteps, step });
+
+      const stepStart = Date.now();
       const executor = step.allow_local ? this.executor : (this.fallbackExecutor ?? this.executor);
 
       let result: StepResult;
@@ -83,8 +95,11 @@ export class OrchestrationLoop {
       // Attempt execution
       for (let attempt = 0; attempt <= this.routingConfig.max_retries; attempt++) {
         attempts = attempt + 1;
+        if (attempt > 0) {
+          emit({ stage: 'step_retry', stepId: step.id, attempt: attempts });
+        }
         try {
-          result = await executor.execute(step, plan.context_for_executor, completedOutputs);
+          result = await executor.execute(step, plan.context_for_executor, completedOutputs, onProgress);
           const verification = verifyStep(step, result);
 
           if (verification.passed) {
@@ -96,10 +111,12 @@ export class OrchestrationLoop {
           if (attempt === this.routingConfig.max_retries) {
             if (step.escalate_if_fails && this.fallbackExecutor && executor !== this.fallbackExecutor) {
               if (!this.routingConfig.privacy_mode) {
+                emit({ stage: 'step_escalated', stepId: step.id });
                 result = await this.fallbackExecutor.execute(
                   step,
                   plan.context_for_executor,
                   completedOutputs,
+                  onProgress,
                 );
                 escalated = true;
                 passed = true;
@@ -109,11 +126,13 @@ export class OrchestrationLoop {
         } catch (err) {
           // Execution error — try escalation
           if (step.escalate_if_fails && this.fallbackExecutor && !this.routingConfig.privacy_mode) {
+            emit({ stage: 'step_escalated', stepId: step.id });
             try {
               result = await this.fallbackExecutor.execute(
                 step,
                 plan.context_for_executor,
                 completedOutputs,
+                onProgress,
               );
               escalated = true;
               passed = true;
@@ -133,6 +152,9 @@ export class OrchestrationLoop {
         tokens_used: 0,
       };
 
+      const stepElapsed = Date.now() - stepStart;
+      emit({ stage: 'step_complete', stepId: step.id, passed, tokens: result.tokens_used, elapsed_ms: stepElapsed });
+
       results.set(step.id, result);
       completedOutputs.push({ stepId: step.id, output: result.output });
       trace.step_results.push({
@@ -146,6 +168,8 @@ export class OrchestrationLoop {
     }
 
     // Synthesize final response
+    emit({ stage: 'synthesizing', message: 'Combining results into final response...' });
+
     const stepSummaries = sortedSteps.map((s) => ({
       title: s.title,
       output: results.get(s.id)?.output ?? '',

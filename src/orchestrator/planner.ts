@@ -4,6 +4,24 @@ import type { ExecutionPlan } from '../types/plan.js';
 
 const PLANNER_SYSTEM_PROMPT = `You are a software engineering task planner. Your job is to decompose a user's request into a sequence of focused, self-contained steps that a smaller AI model can execute independently.
 
+## Executor capabilities
+The executor is a local AI model with access to these tools:
+- **shell_exec**: Run shell commands (git, gh, npm, curl, ls, grep, etc.)
+- **read_file**: Read file contents by path
+- **write_file**: Write/create files with content
+
+The executor CAN:
+- Run CLI commands, interact with the filesystem, use git and gh CLI
+- Read and write files, create directories
+- Generate text, code, explanations, and analysis
+
+The executor CANNOT:
+- Access the internet directly (no browser), but CAN use CLI tools like curl or gh
+- Run long-lived processes or servers
+- Display images or GUIs
+
+When creating steps, feel free to instruct the executor to use shell commands, read files, or write files as needed.
+
 ## Rules
 1. If the task is simple (a direct question, a small code fix, a brief explanation), set estimated_complexity to "low" and create a single step that contains the full task.
 2. For complex tasks, break them into 2-6 steps. Each step must be independently executable.
@@ -38,11 +56,35 @@ export class Planner {
   constructor(private provider: CloudProvider) {}
 
   async createPlan(req: NormalisedLLMRequest): Promise<ExecutionPlan> {
+    // Extract only the latest user message + any system message.
+    // Sending the full conversation history causes the planner to continue
+    // the chat pattern instead of returning structured JSON.
+    const systemMsg = req.messages.find((m) => m.role === 'system');
+    const lastUserMsg = [...req.messages].reverse().find((m) => m.role === 'user');
+
+    if (!lastUserMsg) {
+      throw new Error('No user message found in request');
+    }
+
+    // Build a concise context summary from recent assistant messages (if any)
+    // so the planner knows what's already been discussed
+    const recentContext = req.messages
+      .filter((m) => m.role === 'assistant' && m.content)
+      .slice(-2)
+      .map((m) => m.content.slice(0, 300))
+      .join('\n');
+
+    const userContent = recentContext
+      ? `## Recent conversation context\n${recentContext}\n\n## Current request\n${lastUserMsg.content}`
+      : lastUserMsg.content;
+
+    const messages = [
+      { role: 'system' as const, content: PLANNER_SYSTEM_PROMPT + (systemMsg ? `\n\n## Client system prompt\n${systemMsg.content.slice(0, 500)}` : '') },
+      { role: 'user' as const, content: userContent },
+    ];
+
     const plannerReq: NormalisedLLMRequest = {
-      messages: [
-        { role: 'system', content: PLANNER_SYSTEM_PROMPT },
-        ...req.messages,
-      ],
+      messages,
       model: req.model,
       temperature: 0.2,
       response_format: { type: 'json_object' },
@@ -91,7 +133,6 @@ Combine the step results into a response that directly addresses the user's orig
   }
 
   private parsePlan(content: string): ExecutionPlan {
-    // Try to extract JSON from the response
     let jsonStr = content.trim();
 
     // Strip markdown code fences if present
@@ -100,12 +141,28 @@ Combine the step results into a response that directly addresses the user's orig
       jsonStr = fenceMatch[1].trim();
     }
 
+    // Try direct parse first
     try {
       const parsed = JSON.parse(jsonStr);
       return this.validatePlan(parsed);
     } catch {
-      throw new Error(`Planner returned invalid JSON: ${content.slice(0, 200)}`);
+      // Fall through to extraction attempts
     }
+
+    // Try to find a JSON object anywhere in the response
+    const jsonStart = content.indexOf('{');
+    const jsonEnd = content.lastIndexOf('}');
+    if (jsonStart !== -1 && jsonEnd > jsonStart) {
+      try {
+        const extracted = content.slice(jsonStart, jsonEnd + 1);
+        const parsed = JSON.parse(extracted);
+        return this.validatePlan(parsed);
+      } catch {
+        // Fall through
+      }
+    }
+
+    throw new Error(`Planner returned invalid JSON: ${content.slice(0, 200)}`);
   }
 
   private validatePlan(data: unknown): ExecutionPlan {

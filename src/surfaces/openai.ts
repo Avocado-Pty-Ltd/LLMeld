@@ -1,9 +1,12 @@
 import type { FastifyInstance } from 'fastify';
+import type { ServerResponse } from 'http';
 import type { LLMeldConfig } from '../types/config.js';
 import type { CloudProvider } from '../providers/base.js';
 import type { OrchestrationLoop } from '../orchestrator/loop.js';
 import type { TraceLogger } from '../logger/trace.js';
-import type { NormalisedLLMResponse } from '../types/normalised.js';
+import type { NormalisedLLMRequest, NormalisedLLMResponse } from '../types/normalised.js';
+import type { ProgressEvent } from '../types/plan.js';
+import { TOOL_DEFINITIONS, executeTool } from '../orchestrator/tools.js';
 import { fromOpenAI } from '../normaliser/from-openai.js';
 import { toOpenAIChatCompletion, toOpenAIModelList } from '../normaliser/to-openai.js';
 import { decideRoute } from '../router/policy.js';
@@ -18,11 +21,146 @@ export interface OpenAISurfaceDeps {
   logger: TraceLogger;
 }
 
+/** Run a direct request through the executor with an agentic tool-calling loop. */
+async function runAgenticDirect(
+  provider: CloudProvider,
+  req: NormalisedLLMRequest,
+): Promise<NormalisedLLMResponse> {
+  const MAX_ITERATIONS = 10;
+  const messages = [...req.messages];
+
+  for (let i = 0; i < MAX_ITERATIONS; i++) {
+    const response = await provider.createChatCompletion({
+      ...req,
+      messages: [...messages],
+    });
+
+    if (response.finish_reason !== 'tool_calls' || !response.tool_calls?.length) {
+      return response;
+    }
+
+    // Model wants tools — execute and loop
+    messages.push({
+      role: 'assistant',
+      content: response.content || '',
+      tool_calls: response.tool_calls,
+    });
+
+    for (const tc of response.tool_calls) {
+      let args: Record<string, unknown>;
+      try {
+        args = JSON.parse(tc.function.arguments);
+      } catch {
+        args = {};
+      }
+      const result = await executeTool(tc.function.name, args);
+      messages.push({
+        role: 'tool',
+        content: result.output,
+        tool_call_id: tc.id,
+      });
+    }
+  }
+
+  // Fallback: return last response content
+  return provider.createChatCompletion({ ...req, messages, tools: undefined, tool_choice: undefined });
+}
+
+/** Strip progress markers from assistant messages that were sent in previous turns. */
+function stripProgressMarkers(content: string): string {
+  // Remove everything before the "---" separator that marks the start of actual content
+  const separatorIndex = content.indexOf('\n---\n');
+  if (separatorIndex !== -1) {
+    const afterSeparator = content.slice(separatorIndex + 5).trim();
+    if (afterSeparator) return afterSeparator;
+  }
+  // Also strip individual progress lines if no separator found
+  return content
+    .replace(/^[⏳📋▸✓✗↻↗].*\n/gm, '')
+    .replace(/^\s{2}[⏳📋▸✓✗↻↗].*\n/gm, '')
+    .trim();
+}
+
+/** Convert a progress event into a human-readable line for the chat. */
+function formatProgressLine(event: ProgressEvent): string {
+  switch (event.stage) {
+    case 'planning':
+      return `⏳ ${event.message}\n`;
+    case 'plan_ready':
+      return `📋 Plan ready: ${event.plan.steps.length} step${event.plan.steps.length === 1 ? '' : 's'} (${event.plan.estimated_complexity} complexity)\n\n`;
+    case 'step_start':
+      return `▸ Step ${event.stepIndex + 1}/${event.totalSteps}: ${event.step.title}\n`;
+    case 'step_complete':
+      if (event.passed) {
+        return `  ✓ Complete (${event.tokens} tokens, ${(event.elapsed_ms / 1000).toFixed(1)}s)\n\n`;
+      }
+      return `  ✗ Failed verification\n`;
+    case 'step_retry':
+      return `  ↻ Retrying (attempt ${event.attempt})...\n`;
+    case 'step_escalated':
+      return `  ↗ Escalated to cloud fallback\n`;
+    case 'tool_call':
+      return `  🔧 ${event.tool}(${event.args})\n`;
+    case 'tool_result':
+      return event.truncated ? `  📄 Got result (truncated)\n` : '';
+    case 'synthesizing':
+      return `⏳ ${event.message}\n\n---\n\n`;
+    case 'done':
+      return '';
+  }
+}
+
+/** Write a single SSE content delta chunk to a raw HTTP response. */
+function writeSSEChunk(raw: ServerResponse, id: string, model: string, content: string): void {
+  const chunk = `data: ${JSON.stringify({
+    id,
+    object: 'chat.completion.chunk',
+    created: Math.floor(Date.now() / 1000),
+    model,
+    choices: [
+      {
+        index: 0,
+        delta: { role: 'assistant', content },
+        finish_reason: null,
+      },
+    ],
+  })}\n\n`;
+  raw.write(chunk);
+}
+
+/** Write the SSE finish chunk and [DONE] marker. */
+function writeSSEFinish(raw: ServerResponse, id: string, model: string, usage?: NormalisedLLMResponse['usage']): void {
+  const finishChunk = `data: ${JSON.stringify({
+    id,
+    object: 'chat.completion.chunk',
+    created: Math.floor(Date.now() / 1000),
+    model,
+    choices: [
+      {
+        index: 0,
+        delta: {},
+        finish_reason: 'stop',
+      },
+    ],
+    ...(usage
+      ? {
+          usage: {
+            prompt_tokens: usage.prompt_tokens,
+            completion_tokens: usage.completion_tokens,
+            total_tokens: usage.total_tokens,
+          },
+        }
+      : {}),
+  })}\n\n`;
+  raw.write(finishChunk);
+  raw.write('data: [DONE]\n\n');
+}
+
+/** Build a complete SSE payload string from a finished response (used for direct/non-orchestrated paths). */
 function toSSEStream(response: NormalisedLLMResponse, modelAlias: string): string {
   const id = response.id || `chatcmpl-${uuidv4()}`;
   const chunks: string[] = [];
 
-  // Send content as a single chunk (simulate streaming for non-streaming providers)
   if (response.content) {
     chunks.push(
       `data: ${JSON.stringify({
@@ -41,7 +179,6 @@ function toSSEStream(response: NormalisedLLMResponse, modelAlias: string): strin
     );
   }
 
-  // Send tool calls if present
   if (response.tool_calls) {
     for (const tc of response.tool_calls) {
       chunks.push(
@@ -71,7 +208,6 @@ function toSSEStream(response: NormalisedLLMResponse, modelAlias: string): strin
     }
   }
 
-  // Send finish chunk
   chunks.push(
     `data: ${JSON.stringify({
       id,
@@ -98,7 +234,6 @@ function toSSEStream(response: NormalisedLLMResponse, modelAlias: string): strin
   );
 
   chunks.push('data: [DONE]\n\n');
-
   return chunks.join('');
 }
 
@@ -131,11 +266,90 @@ export function registerOpenAISurface(app: FastifyInstance, deps: OpenAISurfaceD
       const normalised = fromOpenAI(body as Parameters<typeof fromOpenAI>[0]);
       const isStreaming = normalised.stream === true;
 
+      // Strip progress markers from prior assistant messages so they don't
+      // inflate token counts or confuse the planner/executor
+      for (const msg of normalised.messages) {
+        if (msg.role === 'assistant' && msg.content) {
+          msg.content = stripProgressMarkers(msg.content);
+        }
+      }
+
       // Always request non-streaming from providers (we simulate SSE from the result)
       normalised.stream = false;
 
       const routeDecision = decideRoute(normalised, config.routing);
 
+      // Streaming planner-executor path: stream progress + final content incrementally
+      if (isStreaming && routeDecision.path === 'planner-executor') {
+        const raw = reply.raw;
+        const sseId = `chatcmpl-${uuidv4()}`;
+        const modelAlias = config.gateway.model_alias;
+
+        raw.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          'Connection': 'keep-alive',
+        });
+
+        const onProgress = (event: ProgressEvent) => {
+          const line = formatProgressLine(event);
+          if (line) {
+            writeSSEChunk(raw, sseId, modelAlias, line);
+          }
+        };
+
+        const result = await orchestrator.execute(normalised, onProgress);
+
+        // Send the synthesized content
+        if (result.response.content) {
+          writeSSEChunk(raw, sseId, modelAlias, result.response.content);
+        }
+
+        // Send tool calls if present
+        if (result.response.tool_calls) {
+          for (const tc of result.response.tool_calls) {
+            const toolChunk = `data: ${JSON.stringify({
+              id: sseId,
+              object: 'chat.completion.chunk',
+              created: Math.floor(Date.now() / 1000),
+              model: modelAlias,
+              choices: [
+                {
+                  index: 0,
+                  delta: {
+                    tool_calls: [
+                      {
+                        index: 0,
+                        id: tc.id,
+                        type: 'function',
+                        function: { name: tc.function.name, arguments: tc.function.arguments },
+                      },
+                    ],
+                  },
+                  finish_reason: null,
+                },
+              ],
+            })}\n\n`;
+            raw.write(toolChunk);
+          }
+        }
+
+        writeSSEFinish(raw, sseId, modelAlias, result.response.usage);
+        raw.end();
+
+        logger.logRequest({
+          trace_id: traceId,
+          timestamp: new Date().toISOString(),
+          surface: 'openai',
+          route_decision: routeDecision,
+          orchestration: result.trace,
+          latency_ms: Date.now() - start,
+        });
+
+        return reply;
+      }
+
+      // Non-streaming or direct path
       let response;
       let orchestrationTrace;
 
@@ -143,9 +357,13 @@ export function registerOpenAISurface(app: FastifyInstance, deps: OpenAISurfaceD
         const result = await orchestrator.execute(normalised);
         response = result.response;
         orchestrationTrace = result.trace;
+      } else if (routeDecision.provider === 'executor') {
+        // Direct executor path — agentic loop with tool support
+        normalised.tools = TOOL_DEFINITIONS;
+        normalised.tool_choice = 'auto';
+        response = await runAgenticDirect(executorProvider, normalised);
       } else {
-        // Direct path
-        const provider = routeDecision.provider === 'executor' ? executorProvider : plannerProvider;
+        const provider = plannerProvider;
         response = await provider.createChatCompletion(normalised);
       }
 
