@@ -2,29 +2,38 @@
 
 **Save money with local compute**
 
-A powerful tool for integrating, comparing, and orchestrating multiple Large Language Models (LLMs) through a unified interface, optimized for local deployment and cost efficiency.
+A dual-surface API gateway that orchestrates cloud LLM planners with local executors, giving you the intelligence of frontier models with the cost savings of local compute.
 
 ## Overview
 
-LLMeld enables developers and researchers to seamlessly work with multiple LLMs while minimizing costs through local compute optimization. Whether you're evaluating different models, creating ensemble systems, or managing multi-model applications, LLMeld simplifies the process while keeping expenses low.
+LLMeld sits between your AI-powered tools and your model providers. It exposes both OpenAI-compatible and Anthropic-compatible API surfaces, intelligently routing requests between a cloud "planner" (for complex reasoning) and a local "executor" (for straightforward work). The result: significant cost savings without sacrificing quality.
 
 ## Features
 
-- **Multi-Model Integration**: Load and manage various LLMs from different providers and architectures
-- **Local Compute Optimization**: Reduce costs by leveraging local hardware efficiently
-- **Output Comparison**: Compare responses across models with built-in analysis tools
-- **Model Orchestration**: Create complex workflows involving multiple LLMs
-- **Configuration Management**: Flexible system for defining and storing model configurations
-- **Unified API**: Consistent interface regardless of underlying model implementation
-- **Cost Tracking**: Monitor and optimize spending across different model providers
-- **Extensible Architecture**: Easy to add support for new models and providers
+- **Dual API Surfaces**: OpenAI-compatible and Anthropic-compatible endpoints — works with any tool that speaks either protocol
+- **Cloud + Local Orchestration**: Planner/executor architecture routes complex tasks to cloud models and simple tasks to local models
+- **Smart Routing**: Configurable routing modes (`fast`, `balanced`, `best`, `cloud`, `local`) with heuristic task classification
+- **Multi-Provider Support**: OpenRouter, Anthropic, Ollama, and any OpenAI-compatible provider
+- **Automatic Fallback**: Failed local executions gracefully escalate to a cloud fallback provider
+- **Privacy Mode**: Block all cloud escalation for sensitive environments
+- **Configuration-Driven**: Single YAML config for providers, routing, and logging
+- **Token Cost Logging**: Estimated token costs in structured trace logs
+
+### Planned / In Progress
+
+- Output comparison across models
+- Real-time cost analytics dashboard
+- Spending limits and budget alerts
+- Batch processing optimisation
+- Web-based management interface
 
 ## Installation
 
 ### Prerequisites
 
-- Node.js 18+ 
+- Node.js 20+
 - pnpm (recommended) or npm
+- [Ollama](https://ollama.com/) (for local model execution)
 
 ### From Source
 
@@ -37,97 +46,135 @@ pnpm install
 ### Using Docker
 
 ```bash
-docker-compose up -d
+docker compose up -d
 ```
+
+> **Note:** If using the legacy Docker Compose standalone binary, use `docker-compose up -d` instead.
 
 ## Configuration
 
-Copy the example configuration and customize it for your needs:
+Copy the example configuration and customise it for your needs:
 
 ```bash
 cp config.example.yaml config.yaml
 ```
 
-Edit `config.yaml` to configure your model providers, local compute settings, and cost optimization preferences.
+Edit `config.yaml` to configure your providers, routing mode, and logging preferences. See `config.example.yaml` for detailed comments on every option.
+
+Key configuration areas:
+
+- **Gateway**: Ports, API key, model alias
+- **Providers**: Planner (cloud), executor (local), and fallback models
+- **Routing**: Mode selection, complexity thresholds, privacy mode
+- **Logging**: Level, format, trace file, token cost tracking
 
 ## Quick Start
 
-```typescript
-import { LLMeld, ModelManager } from './src';
+1. **Ensure Ollama is running** with a local model pulled:
 
-// Initialize model manager
-const manager = new ModelManager();
+   ```bash
+   ollama pull gemma3:4b
+   ollama serve
+   ```
 
-// Add models with cost optimization
-await manager.addModel({
-  name: "local-llama",
-  provider: "ollama",
-  model: "llama2:7b",
-  costPerToken: 0, // Free local compute
-  priority: "high" // Prefer for cost savings
-});
+2. **Set up your cloud API key** (at least one required):
 
-await manager.addModel({
-  name: "gpt-4",
-  provider: "openai",
-  apiKey: process.env.OPENAI_API_KEY,
-  costPerToken: 0.00003, // Track API costs
-  priority: "low" // Use sparingly
-});
+   ```bash
+   export OPENROUTER_API_KEY="your-key-here"
+   # or
+   export ANTHROPIC_API_KEY="your-key-here"
+   ```
 
-// Create LLMeld instance
-const meld = new LLMeld(manager);
+3. **Configure and start LLMeld:**
 
-// Compare outputs with cost awareness
-const results = await meld.compareModels({
-  prompt: "Explain quantum computing",
-  models: ["local-llama", "gpt-4"],
-  optimizeForCost: true // Prefer cheaper options
-});
+   ```bash
+   cp config.example.yaml config.yaml
+   # Edit config.yaml to match your setup
+   pnpm dev
+   ```
 
-console.log(results.summary());
-console.log(`Total cost: $${results.totalCost}`);
-```
+4. **Send a request** using the OpenAI-compatible surface (default port 8000):
+
+   ```bash
+   curl http://localhost:8000/v1/chat/completions \
+     -H "Content-Type: application/json" \
+     -H "Authorization: Bearer llmeld-local" \
+     -d '{
+       "model": "llmeld/planner-executor",
+       "messages": [{"role": "user", "content": "Explain quantum computing briefly"}],
+       "stream": false
+     }'
+   ```
+
+   Or use the OpenAI SDK pointed at LLMeld:
+
+   ```python
+   from openai import OpenAI
+
+   client = OpenAI(
+       base_url="http://localhost:8000/v1",
+       api_key="llmeld-local"
+   )
+
+   response = client.chat.completions.create(
+       model="llmeld/planner-executor",
+       messages=[{"role": "user", "content": "Explain quantum computing briefly"}]
+   )
+
+   print(response.choices[0].message.content)
+   ```
+
+5. **Anthropic surface** is available on port 8001 for tools like Claude Code.
 
 ## Development
 
 ### Project Structure
 
-- `src/` - Main source code
-- `test/` - Test files
-- `config.example.yaml` - Example configuration
-- `DEVELOPMENT_PLAN.md` - Detailed development roadmap
+```
+src/
+├── config/          # YAML config loading and validation
+├── logger/          # Structured trace logging
+├── normaliser/      # Request/response normalisation
+├── orchestrator/    # Planner/executor orchestration loop
+├── providers/       # Provider implementations (Ollama, OpenRouter, Anthropic, etc.)
+├── router/          # Smart routing and task classification
+├── surfaces/        # OpenAI and Anthropic API surface handlers
+├── types/           # Shared TypeScript types
+└── index.ts         # Fastify server entrypoint
+```
 
 ### Scripts
 
 ```bash
-# Development
+# Development (with hot reload)
 pnpm dev
+
+# Local-only mode (no cloud calls)
+pnpm dev:local-only
 
 # Build
 pnpm build
 
+# Start (production)
+pnpm start
+
 # Test
 pnpm test
 
+# Test (watch mode)
+pnpm test:watch
+
 # Lint
 pnpm lint
-```
 
-### Development Setup
+# Lint (auto-fix)
+pnpm lint:fix
 
-```bash
-# Install dependencies
-pnpm install
-
-# Run in development mode
-pnpm dev
-
-# Run tests
-pnpm test
+# Format
+pnpm format
 
 # Type checking
-pnpm type-check
+pnpm typecheck
 ```
 
 ## Docker Deployment
@@ -136,40 +183,18 @@ The project includes Docker configuration for easy deployment:
 
 ```bash
 # Build and run
-docker-compose up -d
+docker compose up -d
 
 # View logs
-docker-compose logs -f
+docker compose logs -f
 
 # Stop
-docker-compose down
+docker compose down
 ```
-
-## Configuration Options
-
-Key configuration areas in `config.yaml`:
-
-- **Models**: Configure local and API-based models
-- **Cost Optimization**: Set spending limits and preferences
-- **Performance**: Tune local compute settings
-- **Providers**: API keys and endpoints
-- **Workflows**: Default orchestration patterns
-
-## Examples
-
-Check the `test/` directory for usage examples and the `DEVELOPMENT_PLAN.md` for detailed implementation guidelines.
-
-## Cost Optimization Features
-
-- **Local-First Strategy**: Prioritize local models when possible
-- **Smart Fallbacks**: Use API models only when local options insufficient  
-- **Cost Tracking**: Real-time monitoring of API usage costs
-- **Spending Limits**: Configurable budgets and alerts
-- **Batch Processing**: Optimize requests to reduce API calls
 
 ## Contributing
 
-We welcome contributions! Please see the development plan in `DEVELOPMENT_PLAN.md` for current priorities.
+We welcome contributions! Please see `DEVELOPMENT_PLAN.md` for current priorities and the detailed roadmap.
 
 1. Fork the repository
 2. Create a feature branch
@@ -179,35 +204,17 @@ We welcome contributions! Please see the development plan in `DEVELOPMENT_PLAN.m
 
 ## Requirements
 
-- Node.js 18+
-- TypeScript 5+
+- Node.js 20+
+- TypeScript 6+
+- pnpm
+- Ollama (for local execution)
 - Dependencies listed in `package.json`
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## Support
 
 - **Issues**: Report bugs and request features on [GitHub Issues](https://github.com/Avocado-Pty-Ltd/LLMeld/issues)
 - **Discussions**: Join the conversation in [GitHub Discussions](https://github.com/Avocado-Pty-Ltd/LLMeld/discussions)
 
-## Roadmap
-
-See `DEVELOPMENT_PLAN.md` for the complete roadmap. Key upcoming features:
-
-- [ ] Advanced local model optimization
-- [ ] Real-time cost analytics dashboard  
-- [ ] Enhanced provider integrations
-- [ ] Performance benchmarking tools
-- [ ] Web-based management interface
-
-## Acknowledgments
-
-- Built for cost-conscious AI developers
-- Optimized for local compute efficiency
-- Designed with modern TypeScript best practices
-
 ---
 
-**LLMeld** - Making AI development affordable through smart local compute utilization.
+**LLMeld** — Making AI development affordable through smart local compute utilisation.
