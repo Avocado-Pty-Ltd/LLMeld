@@ -1,5 +1,5 @@
 import chalk from 'chalk';
-import { prompt } from 'enquirer';
+import enquirer from 'enquirer';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import * as dotenv from 'dotenv';
@@ -47,7 +47,7 @@ export async function runOnboardingWizard(): Promise<void> {
 async function collectConfiguration(): Promise<OnboardingConfig> {
   // Check if config already exists
   if (existsSync(CONFIG_PATH)) {
-    const overwrite = await prompt<{ shouldOverwrite: boolean }>({
+    const overwrite = await enquirer.prompt<{ shouldOverwrite: boolean }>({
       type: 'confirm',
       name: 'shouldOverwrite',
       message: chalk.bold(
@@ -63,7 +63,7 @@ async function collectConfiguration(): Promise<OnboardingConfig> {
   }
 
   console.log(chalk.bold('\n1. Routing Configuration\n'));
-  const routingMode = await prompt<{ mode: string }>({
+  const routingMode = await enquirer.prompt<{ mode: string }>({
     type: 'select',
     name: 'mode',
     message: 'Which routing mode do you prefer?',
@@ -81,7 +81,7 @@ async function collectConfiguration(): Promise<OnboardingConfig> {
   let apiKeyType = 'openrouter';
   let apiKey = '';
 
-  const apiKeyChoice = await prompt<{ provider: string }>({
+  const apiKeyChoice = await enquirer.prompt<{ provider: string }>({
     type: 'select',
     name: 'provider',
     message: 'Which API provider do you use?',
@@ -99,7 +99,7 @@ async function collectConfiguration(): Promise<OnboardingConfig> {
     let isValidKey = false;
 
     while (!isValidKey) {
-      const keyInput = await prompt<{ key: string }>({
+      const keyInput = await enquirer.prompt<{ key: string }>({
         type: 'password',
         name: 'key',
         message: `Enter your ${apiKeyChoice.provider.toUpperCase()} API key:`,
@@ -129,7 +129,7 @@ async function collectConfiguration(): Promise<OnboardingConfig> {
   let plannerModel = '';
 
   while (!plannerModelValid) {
-    const plannerInput = await prompt<{ model: string }>({
+    const plannerInput = await enquirer.prompt<{ model: string }>({
       type: 'input',
       name: 'model',
       message: 'Cloud planner model (e.g., openai/gpt-4, claude-3-opus):',
@@ -159,7 +159,7 @@ async function collectConfiguration(): Promise<OnboardingConfig> {
   let executorModel = '';
 
   while (!executorModelValid) {
-    const executorInput = await prompt<{ model: string }>({
+    const executorInput = await enquirer.prompt<{ model: string }>({
       type: 'input',
       name: 'model',
       message: 'Local executor model (must be available in Ollama, e.g., llama2, mistral):',
@@ -177,7 +177,7 @@ async function collectConfiguration(): Promise<OnboardingConfig> {
 
   console.log(chalk.bold('\n4. Logging Configuration\n'));
 
-  const loggingLevel = await prompt<{ level: string }>({
+  const loggingLevel = await enquirer.prompt<{ level: string }>({
     type: 'select',
     name: 'level',
     message: 'What logging level do you prefer?',
@@ -191,7 +191,7 @@ async function collectConfiguration(): Promise<OnboardingConfig> {
 
   console.log(chalk.bold('\n5. Privacy Configuration\n'));
 
-  const privacyMode = await prompt<{ privacy: boolean }>({
+  const privacyMode = await enquirer.prompt<{ privacy: boolean }>({
     type: 'confirm',
     name: 'privacy',
     message: 'Enable strict privacy mode (no cloud escalation, only local execution)?',
