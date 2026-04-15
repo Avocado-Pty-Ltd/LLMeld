@@ -1,7 +1,7 @@
 import type { CloudProvider } from '../providers/base.js';
 import type { NormalisedLLMRequest, NormalisedLLMResponse } from '../types/normalised.js';
 import type { RoutingConfig } from '../types/config.js';
-import type { ExecutionPlan, StepResult } from '../types/plan.js';
+import type { ExecutionPlan, StepResult, ProgressEvent } from '../types/plan.js';
 import { Planner } from './planner.js';
 import { Executor } from './executor.js';
 import { verifyStep } from './verifier.js';
@@ -39,10 +39,14 @@ export class OrchestrationLoop {
     }
   }
 
-  async execute(req: NormalisedLLMRequest): Promise<{
+  async execute(
+    req: NormalisedLLMRequest,
+    onProgress?: (event: ProgressEvent) => void,
+  ): Promise<{
     response: NormalisedLLMResponse;
     trace: OrchestrationTrace;
   }> {
+    const emit = onProgress ?? (() => {});
     const trace: OrchestrationTrace = {
       trace_id: uuidv4(),
       step_results: [],
@@ -51,12 +55,12 @@ export class OrchestrationLoop {
 
     let plan: ExecutionPlan;
     try {
-      plan = await this.planner.createPlan(req);
+      plan = await this.planner.createPlan(req, onProgress);
       trace.plan = plan;
     } catch (err) {
       // If planner fails, retry once
       try {
-        plan = await this.planner.createPlan(req);
+        plan = await this.planner.createPlan(req, onProgress);
         trace.plan = plan;
       } catch (retryErr) {
         trace.error = `Planner failed: ${retryErr instanceof Error ? retryErr.message : retryErr}`;
@@ -67,15 +71,21 @@ export class OrchestrationLoop {
 
     // Topological sort of steps by depends_on
     const sortedSteps = this.topologicalSort(plan.steps);
+    emit({ stage: 'plan_ready', plan });
 
     // Execute steps
     const results: Map<string, StepResult> = new Map();
-    const completedOutputs: Array<{ stepId: string; output: string }> = [];
+    const completedOutputs: Array<{ stepId: string; output: string; confidence?: string; tool_log?: string[]; files_touched?: string[] }> = [];
+    const totalSteps = sortedSteps.length;
 
-    for (const step of sortedSteps) {
+    for (let stepIndex = 0; stepIndex < sortedSteps.length; stepIndex++) {
+      const step = sortedSteps[stepIndex];
+      emit({ stage: 'step_start', stepIndex, totalSteps, step });
+
+      const stepStart = Date.now();
       const executor = step.allow_local ? this.executor : (this.fallbackExecutor ?? this.executor);
 
-      let result: StepResult;
+      let result: StepResult | undefined;
       let passed = false;
       let escalated = false;
       let attempts = 0;
@@ -83,8 +93,11 @@ export class OrchestrationLoop {
       // Attempt execution
       for (let attempt = 0; attempt <= this.routingConfig.max_retries; attempt++) {
         attempts = attempt + 1;
+        if (attempt > 0) {
+          emit({ stage: 'step_retry', stepId: step.id, attempt: attempts });
+        }
         try {
-          result = await executor.execute(step, plan.context_for_executor, completedOutputs);
+          result = await executor.execute(step, plan.context_for_executor, completedOutputs, onProgress);
           const verification = verifyStep(step, result);
 
           if (verification.passed) {
@@ -92,28 +105,45 @@ export class OrchestrationLoop {
             break;
           }
 
-          // Last retry — try escalation
+          // Last retry — try escalation with failure context
           if (attempt === this.routingConfig.max_retries) {
             if (step.escalate_if_fails && this.fallbackExecutor && executor !== this.fallbackExecutor) {
               if (!this.routingConfig.privacy_mode) {
+                emit({ stage: 'step_escalated', stepId: step.id });
+                const failCtx = {
+                  reason: verification.reasons.join('; ') || 'Verification failed',
+                  toolLog: result.tool_log ?? [],
+                  partialOutput: result.output ?? '',
+                };
                 result = await this.fallbackExecutor.execute(
                   step,
                   plan.context_for_executor,
                   completedOutputs,
+                  onProgress,
+                  failCtx,
                 );
                 escalated = true;
-                passed = true;
+                const escalatedVerification = verifyStep(step, result);
+                passed = escalatedVerification.passed;
               }
             }
           }
         } catch (err) {
-          // Execution error — try escalation
+          // Execution error — try escalation with error context
           if (step.escalate_if_fails && this.fallbackExecutor && !this.routingConfig.privacy_mode) {
+            emit({ stage: 'step_escalated', stepId: step.id });
+            const failCtx = {
+              reason: err instanceof Error ? err.message : String(err),
+              toolLog: result?.tool_log ?? [],
+              partialOutput: result?.output ?? '',
+            };
             try {
               result = await this.fallbackExecutor.execute(
                 step,
                 plan.context_for_executor,
                 completedOutputs,
+                onProgress,
+                failCtx,
               );
               escalated = true;
               passed = true;
@@ -133,8 +163,17 @@ export class OrchestrationLoop {
         tokens_used: 0,
       };
 
+      const stepElapsed = Date.now() - stepStart;
+      emit({ stage: 'step_complete', stepId: step.id, passed, tokens: result.tokens_used, elapsed_ms: stepElapsed });
+
       results.set(step.id, result);
-      completedOutputs.push({ stepId: step.id, output: result.output });
+      completedOutputs.push({
+        stepId: step.id,
+        output: result.output,
+        confidence: result.confidence,
+        tool_log: result.tool_log,
+        files_touched: result.files_touched,
+      });
       trace.step_results.push({
         step_id: step.id,
         attempt: attempts,
@@ -146,6 +185,8 @@ export class OrchestrationLoop {
     }
 
     // Synthesize final response
+    emit({ stage: 'synthesizing', message: 'Combining results into final response...' });
+
     const stepSummaries = sortedSteps.map((s) => ({
       title: s.title,
       output: results.get(s.id)?.output ?? '',
