@@ -1,3 +1,4 @@
+import { execSync } from 'child_process';
 import type { CloudProvider } from '../providers/base.js';
 import type { NormalisedLLMRequest } from '../types/normalised.js';
 import type { ExecutionPlan } from '../types/plan.js';
@@ -22,15 +23,26 @@ The executor CANNOT:
 
 When creating steps, feel free to instruct the executor to use shell commands, read files, or write files as needed.
 
+## Working environment
+All tools run in the current working directory on the user's machine.
+- If the CWD is already a git checkout of the target repo, do NOT clone it again — the files are already on disk. Use read_file and shell_exec directly.
+- Only clone a repository if the user's request targets a DIFFERENT repo that is not already checked out locally.
+- The local environment details (CWD, git remote, branch) are appended to this prompt — use them to decide.
+
 ## Rules
-1. If the task is simple (a direct question, a small code fix, a brief explanation), set estimated_complexity to "low" and create a single step that contains the full task.
+1. If the task is simple (a direct question, a small code fix, a brief explanation), set estimated_complexity to "low" and create a single step.
 2. For complex tasks, break them into 2-6 steps. Each step must be independently executable.
-3. Each step's "instruction" must contain ALL context the executor needs — relevant code snippets, file paths, constraints, expected function signatures. The executor cannot see the original conversation.
-4. Each step's "expected_output" must describe what correct output looks like, so it can be verified.
-5. Set "allow_local" to false on steps that require deep reasoning, large context synthesis, or tasks that a small model would likely fail at.
-6. Set "escalate_if_fails" to true on critical steps where an incorrect result would cascade.
-7. For code tasks: each step should produce a concrete artifact (a function, a file modification, a test). Avoid vague steps like "think about the design".
-8. Include relevant code from the conversation in step instructions — the executor cannot see prior messages.
+3. **KEEP STEPS SIMPLE.** The executor is a small local model. Each step should do ONE thing:
+   - GOOD: "Read file src/config.ts and list all exported functions"
+   - GOOD: "Write a function called parseConfig that takes a string and returns a Config object"
+   - BAD: "Read the codebase, design a solution, implement it, and write tests" (too many things)
+   - BAD: A step with 10 numbered sub-tasks (break those into separate steps instead)
+4. Step instructions should be 1-3 sentences. Put shared context in "context_for_executor" instead of repeating it in every step.
+5. Each step's "expected_output" should be a short description of what success looks like.
+6. Set "allow_local" to false on steps that require deep reasoning or large context synthesis.
+7. Set "escalate_if_fails" to true on critical steps where failure would cascade.
+8. For code tasks: each step should produce ONE concrete artifact (a single function, one file edit, one command).
+9. Include relevant code/file paths from the conversation in step instructions — the executor cannot see prior messages.
 
 ## Output format
 Return ONLY a single JSON object (no markdown fences, no explanation) matching this schema:
@@ -78,8 +90,11 @@ export class Planner {
       ? `## Recent conversation context\n${recentContext}\n\n## Current request\n${lastUserMsg.content}`
       : lastUserMsg.content;
 
+    // Gather local environment context so the planner knows where tools run
+    const envContext = this.getEnvironmentContext();
+
     const messages = [
-      { role: 'system' as const, content: PLANNER_SYSTEM_PROMPT + (systemMsg ? `\n\n## Client system prompt\n${systemMsg.content.slice(0, 500)}` : '') },
+      { role: 'system' as const, content: PLANNER_SYSTEM_PROMPT + envContext + (systemMsg ? `\n\n## Client system prompt\n${systemMsg.content.slice(0, 500)}` : '') },
       { role: 'user' as const, content: userContent },
     ];
 
@@ -130,6 +145,19 @@ Combine the step results into a response that directly addresses the user's orig
 
     const response = await this.provider.createChatCompletion(synthesisReq);
     return response.content;
+  }
+
+  private getEnvironmentContext(): string {
+    const cwd = process.cwd();
+    let gitInfo = '';
+    try {
+      const remote = execSync('git remote get-url origin 2>/dev/null', { encoding: 'utf-8' }).trim();
+      const branch = execSync('git branch --show-current 2>/dev/null', { encoding: 'utf-8' }).trim();
+      gitInfo = `\nGit repo: ${remote} (branch: ${branch})`;
+    } catch {
+      // Not a git repo — that's fine
+    }
+    return `\n\n## Local environment\nCWD: ${cwd}${gitInfo}`;
   }
 
   private parsePlan(content: string): ExecutionPlan {

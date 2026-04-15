@@ -23,20 +23,26 @@ export function verifyStep(step: PlanStep, result: StepResult): VerificationResu
     reasons.push(`Executor reported issues: ${result.issues.join('; ')}`);
   }
 
-  // Structural checks for code output
-  if (isCodeExpected(step)) {
+  // Detect if the executor used tools (agentic output)
+  const usedTools = result.output.includes('## Tool activity log');
+
+  // Structural checks for code output — skip if tools were used
+  // (code was written via write_file, not inline in the response)
+  if (isCodeExpected(step) && !usedTools) {
     if (!containsCodeBlock(result.output) && !looksLikeCode(result.output)) {
       reasons.push('Expected code output but none detected');
     }
   }
 
   // Check that output references key terms from expected_output
+  // More lenient for agentic output — only fail if >75% terms missing
   if (step.expected_output) {
     const keyTerms = extractKeyTerms(step.expected_output);
     const missingTerms = keyTerms.filter(
       (term) => !result.output.toLowerCase().includes(term.toLowerCase()),
     );
-    if (missingTerms.length > keyTerms.length / 2 && keyTerms.length > 0) {
+    const threshold = usedTools ? 0.75 : 0.5;
+    if (missingTerms.length > keyTerms.length * threshold && keyTerms.length > 0) {
       reasons.push(`Output may not match expectations — missing key terms: ${missingTerms.join(', ')}`);
     }
   }

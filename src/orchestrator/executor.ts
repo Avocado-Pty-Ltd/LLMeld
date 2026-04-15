@@ -65,6 +65,7 @@ ${step.expected_output}`;
     ];
 
     let totalTokens = 0;
+    const toolLog: string[] = [];
 
     for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
       const req: NormalisedLLMRequest = {
@@ -79,7 +80,11 @@ ${step.expected_output}`;
 
       // If model returned text with no tool calls, we're done
       if (response.finish_reason !== 'tool_calls' || !response.tool_calls?.length) {
-        return this.parseResult(step.id, response.content, totalTokens);
+        // Append tool log to output so the verifier can see what was done
+        const finalContent = toolLog.length > 0
+          ? `${response.content}\n\n## Tool activity log\n${toolLog.join('\n')}`
+          : response.content;
+        return this.parseResult(step.id, finalContent, totalTokens);
       }
 
       // Model wants to call tools — add assistant message with tool_calls
@@ -112,6 +117,7 @@ ${step.expected_output}`;
         });
 
         const result = await executeTool(tc.function.name, args);
+        toolLog.push(`- ${tc.function.name}(${argsPreview}) → ${result.output.slice(0, 100)}${result.output.length > 100 ? '...' : ''}`);
 
         emit({
           stage: 'tool_result',
