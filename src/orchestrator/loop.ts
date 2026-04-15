@@ -53,16 +53,14 @@ export class OrchestrationLoop {
       total_tokens: 0,
     };
 
-    emit({ stage: 'planning', message: 'Decomposing task into steps...' });
-
     let plan: ExecutionPlan;
     try {
-      plan = await this.planner.createPlan(req);
+      plan = await this.planner.createPlan(req, onProgress);
       trace.plan = plan;
     } catch (err) {
       // If planner fails, retry once
       try {
-        plan = await this.planner.createPlan(req);
+        plan = await this.planner.createPlan(req, onProgress);
         trace.plan = plan;
       } catch (retryErr) {
         trace.error = `Planner failed: ${retryErr instanceof Error ? retryErr.message : retryErr}`;
