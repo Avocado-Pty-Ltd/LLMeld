@@ -41,11 +41,24 @@ LLMeld sits between your AI-powered tools and your model providers. It exposes b
 git clone https://github.com/Avocado-Pty-Ltd/LLMeld.git
 cd LLMeld
 pnpm install
+# or if using npm:
+npm install
 ```
 
 ### Using Docker
 
 ```bash
+# Create config from example
+cp config.example.yaml config.yaml
+
+# Create .env file with your API keys
+cat > .env << 'EOF'
+OPENROUTER_API_KEY="your-key-here"
+# or
+ANTHROPIC_API_KEY="your-key-here"
+EOF
+
+# Start the service
 docker compose up -d
 ```
 
@@ -108,20 +121,20 @@ Key configuration areas:
 
    Or use the OpenAI SDK pointed at LLMeld:
 
-   ```python
-   from openai import OpenAI
+   ```typescript
+   import OpenAI from 'openai';
 
-   client = OpenAI(
-       base_url="http://localhost:8000/v1",
-       api_key="llmeld-local"
-   )
+   const client = new OpenAI({
+     baseURL: 'http://localhost:8000/v1',
+     apiKey: 'llmeld-local',
+   });
 
-   response = client.chat.completions.create(
-       model="llmeld/planner-executor",
-       messages=[{"role": "user", "content": "Explain quantum computing briefly"}]
-   )
+   const response = await client.chat.completions.create({
+     model: 'llmeld/planner-executor',
+     messages: [{ role: 'user', content: 'Explain quantum computing briefly' }],
+   });
 
-   print(response.choices[0].message.content)
+   console.log(response.choices[0].message.content);
    ```
 
 5. **Anthropic surface** is available on port 8001 for tools like Claude Code.
@@ -132,89 +145,139 @@ Key configuration areas:
 
 ```
 src/
-├── config/          # YAML config loading and validation
-├── logger/          # Structured trace logging
-├── normaliser/      # Request/response normalisation
-├── orchestrator/    # Planner/executor orchestration loop
-├── providers/       # Provider implementations (Ollama, OpenRouter, Anthropic, etc.)
-├── router/          # Smart routing and task classification
-├── surfaces/        # OpenAI and Anthropic API surface handlers
-├── types/           # Shared TypeScript types
-└── index.ts         # Fastify server entrypoint
+├── config/          # Configuration loading and validation
+├── gateway/         # HTTP API gateway and routing logic
+├── providers/       # Provider implementations (OpenRouter, Anthropic, Ollama)
+├── core/            # Core orchestration logic
+├── types/           # TypeScript type definitions
+└── utils/           # Utility functions (logging, cost tracking)
 ```
 
-### Scripts
+### Running in Development
 
 ```bash
-# Development (with hot reload)
 pnpm dev
-
-# Local-only mode (no cloud calls)
-pnpm dev:local-only
-
-# Build
-pnpm build
-
-# Start (production)
-pnpm start
-
-# Test
-pnpm test
-
-# Test (watch mode)
-pnpm test:watch
-
-# Lint
-pnpm lint
-
-# Lint (auto-fix)
-pnpm lint:fix
-
-# Format
-pnpm format
-
-# Type checking
-pnpm typecheck
 ```
 
-## Docker Deployment
+This starts the development server with hot reloading.
 
-The project includes Docker configuration for easy deployment:
+### Building for Production
 
 ```bash
-# Build and run
-docker compose up -d
-
-# View logs
-docker compose logs -f
-
-# Stop
-docker compose down
+pnpm build
+pnpm start
 ```
+
+### Running Tests
+
+```bash
+pnpm test
+```
+
+## Architecture
+
+### Planner-Executor Pattern
+
+LLMeld implements a two-model architecture:
+
+- **Planner**: A cloud-based frontier model (via OpenRouter, Anthropic, etc.) that handles complex reasoning and planning
+- **Executor**: A local model (via Ollama) that handles straightforward execution tasks
+
+### Routing Modes
+
+- **`fast`** (default): Routes to local executor whenever possible; escalates complex tasks to planner
+- **`balanced`**: Uses heuristic classification to split work
+- **`best`**: Always routes to the best model for the job (usually cloud planner)
+- **`cloud`**: Bypasses local executor, routes all to cloud planner
+- **`local`**: Bypasses cloud planner, routes all to local executor
+
+### Privacy Mode
+
+When enabled (`privacy_mode: true`), LLMeld blocks all cloud escalation and logs a warning when a task would normally escalate. This is useful for sensitive environments where cloud inference is prohibited.
+
+## Configuration Example
+
+```yaml
+gateway:
+  port: 8000
+  anthropic_port: 8001
+  api_key: llmeld-local
+  model_alias:
+    - name: llmeld/planner-executor
+      planner: gpt-4o-mini
+      executor: local/gemma3
+
+providers:
+  openrouter:
+    api_key: ${OPENROUTER_API_KEY}
+  anthropic:
+    api_key: ${ANTHROPIC_API_KEY}
+  ollama:
+    base_url: http://localhost:11434
+
+routing:
+  mode: fast
+  complexity_threshold: 0.6
+  privacy_mode: false
+
+logging:
+  level: info
+  format: json
+  trace_file: ./traces.jsonl
+  track_token_costs: true
+```
+
+## Cost Analysis
+
+LLMeld automatically logs token costs for each request when `track_token_costs: true`. View cost breakdowns:
+
+```bash
+cat traces.jsonl | jq 'select(.cost_usd) | {timestamp, model, cost_usd}'
+```
+
+## Troubleshooting
+
+### Ollama Connection Issues
+
+Ensure Ollama is running and accessible:
+
+```bash
+curl http://localhost:11434/api/tags
+```
+
+### API Key Errors
+
+Check that environment variables are set:
+
+```bash
+echo $OPENROUTER_API_KEY
+echo $ANTHROPIC_API_KEY
+```
+
+### Docker Container Won't Start
+
+Check the logs:
+
+```bash
+docker logs -f llmeld
+```
+
+Ensure `config.yaml` and `.env` exist in the project root before running `docker compose up`.
 
 ## Contributing
 
-We welcome contributions! Please see `DEVELOPMENT_PLAN.md` for current priorities and the detailed roadmap.
+We welcome contributions! Please:
 
 1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests
-5. Submit a pull request
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
 
-## Requirements
+## License
 
-- Node.js 20+
-- TypeScript 6+
-- pnpm
-- Ollama (for local execution)
-- Dependencies listed in `package.json`
+MIT License — see LICENSE file for details.
 
 ## Support
 
-- **Issues**: Report bugs and request features on [GitHub Issues](https://github.com/Avocado-Pty-Ltd/LLMeld/issues)
-- **Discussions**: Join the conversation in [GitHub Discussions](https://github.com/Avocado-Pty-Ltd/LLMeld/discussions)
-
----
-
-**LLMeld** — Making AI development affordable through smart local compute utilisation.
+For issues, questions, or suggestions, please open an issue on GitHub or contact the maintainers.
