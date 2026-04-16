@@ -3,6 +3,7 @@ import { dirname } from 'node:path';
 import type { LoggingConfig } from '../types/config.js';
 import type { RouteDecision } from '../router/policy.js';
 import type { OrchestrationTrace } from '../orchestrator/loop.js';
+import type { StatsCollector } from '../dashboard/stats.js';
 
 export interface RequestTrace {
   trace_id: string;
@@ -19,12 +20,14 @@ export class TraceLogger {
   private level: string;
   private format: string;
   private emitCosts: boolean;
+  private stats?: StatsCollector;
 
-  constructor(config: LoggingConfig) {
+  constructor(config: LoggingConfig, stats?: StatsCollector) {
     this.traceFile = config.trace_file;
     this.level = config.level;
     this.format = config.format;
     this.emitCosts = config.emit_token_costs;
+    this.stats = stats;
 
     // Ensure log directory exists
     try {
@@ -55,6 +58,9 @@ export class TraceLogger {
     } else {
       this.jsonLog(entry);
     }
+
+    // Feed dashboard stats
+    this.stats?.recordRequest(trace);
   }
 
   log(level: string, message: string, data?: Record<string, unknown>): void {
