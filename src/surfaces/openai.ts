@@ -6,7 +6,10 @@ import type { OrchestrationLoop } from '../orchestrator/loop.js';
 import type { TraceLogger } from '../logger/trace.js';
 import type { NormalisedLLMRequest, NormalisedLLMResponse } from '../types/normalised.js';
 import type { ProgressEvent } from '../types/plan.js';
-import { TOOL_DEFINITIONS, executeTool } from '../orchestrator/tools.js';
+import type { MemoryCache } from '../cache/memory-cache.js';
+import { TOOL_DEFINITIONS } from '../orchestrator/tools.js';
+import { runAgenticDirect } from '../orchestrator/agent.js';
+import { getOrBuildMemory, compactMessages } from '../orchestrator/memory.js';
 import { fromOpenAI } from '../normaliser/from-openai.js';
 import { toOpenAIChatCompletion, toOpenAIModelList } from '../normaliser/to-openai.js';
 import { decideRoute } from '../router/policy.js';
@@ -19,51 +22,7 @@ export interface OpenAISurfaceDeps {
   fallbackProvider?: CloudProvider;
   orchestrator: OrchestrationLoop;
   logger: TraceLogger;
-}
-
-/** Run a direct request through the executor with an agentic tool-calling loop. */
-async function runAgenticDirect(
-  provider: CloudProvider,
-  req: NormalisedLLMRequest,
-): Promise<NormalisedLLMResponse> {
-  const MAX_ITERATIONS = 10;
-  const messages = [...req.messages];
-
-  for (let i = 0; i < MAX_ITERATIONS; i++) {
-    const response = await provider.createChatCompletion({
-      ...req,
-      messages: [...messages],
-    });
-
-    if (response.finish_reason !== 'tool_calls' || !response.tool_calls?.length) {
-      return response;
-    }
-
-    // Model wants tools — execute and loop
-    messages.push({
-      role: 'assistant',
-      content: response.content || '',
-      tool_calls: response.tool_calls,
-    });
-
-    for (const tc of response.tool_calls) {
-      let args: Record<string, unknown>;
-      try {
-        args = JSON.parse(tc.function.arguments);
-      } catch {
-        args = {};
-      }
-      const result = await executeTool(tc.function.name, args);
-      messages.push({
-        role: 'tool',
-        content: result.output,
-        tool_call_id: tc.id,
-      });
-    }
-  }
-
-  // Fallback: return last response content
-  return provider.createChatCompletion({ ...req, messages, tools: undefined, tool_choice: undefined });
+  memoryCache: MemoryCache;
 }
 
 /** Strip progress markers from assistant messages that were sent in previous turns. */
@@ -238,7 +197,7 @@ function toSSEStream(response: NormalisedLLMResponse, modelAlias: string): strin
 }
 
 export function registerOpenAISurface(app: FastifyInstance, deps: OpenAISurfaceDeps) {
-  const { config, plannerProvider, executorProvider, orchestrator, logger } = deps;
+  const { config, plannerProvider, executorProvider, orchestrator, logger, memoryCache } = deps;
 
   // Auth hook
   app.addHook('onRequest', async (request, reply) => {
@@ -277,6 +236,9 @@ export function registerOpenAISurface(app: FastifyInstance, deps: OpenAISurfaceD
       // Always request non-streaming from providers (we simulate SSE from the result)
       normalised.stream = false;
 
+      // Build working memory from conversation history (with session-level caching)
+      const { memory, sessionKey, messageCount } = await getOrBuildMemory(normalised, executorProvider, memoryCache);
+
       const routeDecision = decideRoute(normalised, config.routing);
 
       // Streaming planner-executor path: stream progress + final content incrementally
@@ -298,7 +260,7 @@ export function registerOpenAISurface(app: FastifyInstance, deps: OpenAISurfaceD
           }
         };
 
-        const result = await orchestrator.execute(normalised, onProgress);
+        const result = await orchestrator.execute(normalised, memory, onProgress);
 
         // Send the synthesized content
         if (result.response.content) {
@@ -346,6 +308,9 @@ export function registerOpenAISurface(app: FastifyInstance, deps: OpenAISurfaceD
           latency_ms: Date.now() - start,
         });
 
+        // Write mutated memory back to cache
+        memoryCache.update(sessionKey, memory, messageCount);
+
         return reply;
       }
 
@@ -354,17 +319,19 @@ export function registerOpenAISurface(app: FastifyInstance, deps: OpenAISurfaceD
       let orchestrationTrace;
 
       if (routeDecision.path === 'planner-executor') {
-        const result = await orchestrator.execute(normalised);
+        const result = await orchestrator.execute(normalised, memory);
         response = result.response;
         orchestrationTrace = result.trace;
       } else if (routeDecision.provider === 'executor') {
-        // Direct executor path — agentic loop with tool support
-        normalised.tools = TOOL_DEFINITIONS;
-        normalised.tool_choice = 'auto';
-        response = await runAgenticDirect(executorProvider, normalised);
+        // Direct executor path — compact messages with working memory
+        const compacted = compactMessages(normalised, memory);
+        compacted.tools = TOOL_DEFINITIONS;
+        compacted.tool_choice = 'auto';
+        response = await runAgenticDirect(executorProvider, compacted);
       } else {
-        const provider = plannerProvider;
-        response = await provider.createChatCompletion(normalised);
+        // Direct cloud path — compact messages with working memory
+        const compacted = compactMessages(normalised, memory);
+        response = await plannerProvider.createChatCompletion(compacted);
       }
 
       logger.logRequest({
@@ -375,6 +342,9 @@ export function registerOpenAISurface(app: FastifyInstance, deps: OpenAISurfaceD
         orchestration: orchestrationTrace,
         latency_ms: Date.now() - start,
       });
+
+      // Write mutated memory back to cache
+      memoryCache.update(sessionKey, memory, messageCount);
 
       if (isStreaming) {
         const ssePayload = toSSEStream(response, config.gateway.model_alias);
