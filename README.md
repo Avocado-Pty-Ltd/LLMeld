@@ -16,13 +16,14 @@ LLMeld sits between your AI-powered tools and your model providers. It exposes b
 - **Multi-Provider Support**: OpenRouter, Anthropic, Ollama, and any OpenAI-compatible provider
 - **Automatic Fallback**: Failed local executions gracefully escalate to a cloud fallback provider
 - **Privacy Mode**: Block all cloud escalation for sensitive environments
+- **TUI Dashboard**: Live terminal dashboard with request stats, latency tracking, cost estimates, and scrollable log viewer
+- **Interactive Onboarding**: Setup wizard auto-detects available Ollama models and walks you through first-time configuration
 - **Configuration-Driven**: Single YAML config for providers, routing, and logging
 - **Token Cost Logging**: Estimated token costs in structured trace logs
 
 ### Planned / In Progress
 
 - Output comparison across models
-- Real-time cost analytics dashboard
 - Spending limits and budget alerts
 - Batch processing optimisation
 - Web-based management interface
@@ -98,7 +99,13 @@ Key configuration areas:
    export ANTHROPIC_API_KEY="your-key-here"
    ```
 
-3. **Configure and start LLMeld:**
+3. **Start LLMeld** (the onboarding wizard runs automatically on first launch if no `config.yaml` exists):
+
+   ```bash
+   pnpm dev
+   ```
+
+   Or configure manually:
 
    ```bash
    cp config.example.yaml config.yaml
@@ -145,12 +152,17 @@ Key configuration areas:
 
 ```
 src/
-├── config/          # Configuration loading and validation
-├── gateway/         # HTTP API gateway and routing logic
+├── config/          # Configuration loading, validation, and Zod schema
+├── dashboard/       # TUI dashboard (stats, renderer, log viewer, key handler)
+├── logger/          # Structured trace logging
+├── normaliser/      # Request/response format normalisation
+├── orchestrator/    # Planner-executor loop, tools, and verification
 ├── providers/       # Provider implementations (OpenRouter, Anthropic, Ollama)
-├── core/            # Core orchestration logic
+├── router/          # Routing policy and task classifier
+├── surfaces/        # OpenAI and Anthropic API surface handlers
 ├── types/           # TypeScript type definitions
-└── utils/           # Utility functions (logging, cost tracking)
+├── index.ts         # Entry point
+└── onboarding.ts    # Interactive setup wizard
 ```
 
 ### Running in Development
@@ -199,40 +211,69 @@ When enabled (`privacy_mode: true`), LLMeld blocks all cloud escalation and logs
 
 ```yaml
 gateway:
-  port: 8000
+  openai_port: 8000
   anthropic_port: 8001
   api_key: llmeld-local
-  model_alias:
-    - name: llmeld/planner-executor
-      planner: gpt-4o-mini
-      executor: local/gemma3
+  model_alias: llmeld/planner-executor
 
 providers:
-  openrouter:
-    api_key: ${OPENROUTER_API_KEY}
-  anthropic:
-    api_key: ${ANTHROPIC_API_KEY}
-  ollama:
-    base_url: http://localhost:11434
+  planner:
+    type: openrouter
+    model: anthropic/claude-sonnet-4-20250514
+    api_key_env: OPENROUTER_API_KEY
+
+  executor:
+    type: ollama
+    model: gemma3:4b
+    base_url: "http://localhost:11434/v1"
+
+  fallback:
+    type: anthropic
+    model: claude-haiku-4-20250514
+    api_key_env: ANTHROPIC_API_KEY
 
 routing:
-  mode: fast
-  complexity_threshold: 0.6
+  default_mode: balanced
   privacy_mode: false
 
 logging:
   level: info
-  format: json
-  trace_file: ./traces.jsonl
-  track_token_costs: true
+  format: pretty
+  trace_file: ./logs/traces.jsonl
+  emit_token_costs: true
+```
+
+See `config.example.yaml` for the full reference with all options and comments.
+
+## Dashboard
+
+When running in a TTY, LLMeld displays a live terminal dashboard showing:
+
+- Request counts, average latency, token usage, and estimated costs
+- Breakdown by route (direct vs planner-executor), task type, and API surface
+- Recent request log with timestamps, routing path, and per-request latency
+
+**Keyboard shortcuts:**
+
+| Key | Action |
+|-----|--------|
+| `Q` | Quit |
+| `L` | Toggle log viewer |
+| `C` | Clear stats |
+| `Up/Down` | Scroll logs |
+
+To disable the dashboard and use plain console output:
+
+```bash
+pnpm dev -- --no-dashboard
 ```
 
 ## Cost Analysis
 
-LLMeld automatically logs token costs for each request when `track_token_costs: true`. View cost breakdowns:
+LLMeld automatically logs estimated token costs for each request when `emit_token_costs: true`. View cost breakdowns:
 
 ```bash
-cat traces.jsonl | jq 'select(.cost_usd) | {timestamp, model, cost_usd}'
+cat logs/traces.jsonl | jq 'select(.estimated_cost) | {timestamp, estimated_cost}'
 ```
 
 ## Troubleshooting
