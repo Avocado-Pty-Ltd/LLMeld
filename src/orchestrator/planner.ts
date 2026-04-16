@@ -35,7 +35,7 @@ All tools run in the current working directory of the LLMeld server, which may N
 
 ## Rules
 1. If the task is simple (a direct question, a small code fix, a brief explanation), set estimated_complexity to "low" and create a single step.
-2. For complex tasks, break them into 2-6 steps. Each step must be independently executable.
+2. For complex tasks, break them into as many steps as needed to cover the FULL scope (typically 3-12 steps). Each step must be independently executable. Do NOT artificially compress a complex task into too few steps — thoroughness is more important than brevity.
 3. **KEEP STEPS SIMPLE.** The executor is a small local model. Each step should do ONE thing:
    - GOOD: "Read file src/config.ts and list all exported functions"
    - GOOD: "Write a function called parseConfig that takes a string and returns a Config object"
@@ -47,6 +47,7 @@ All tools run in the current working directory of the LLMeld server, which may N
 7. Set "escalate_if_fails" to true on critical steps where failure would cascade.
 8. For code tasks: each step should produce ONE concrete artifact (a single function, one file edit, one command).
 9. Include relevant code/file paths from the conversation in step instructions — the executor cannot see prior messages.
+10. **FULL SCOPE COVERAGE:** Before finalizing your plan, re-read the user's request and ask yourself: "Does every aspect of what they asked for have a corresponding step?" A request like "set up dual branding" means ALL layers (Android, iOS, theming, assets, configs) — not just one platform. A request like "add authentication" means routes, middleware, database, AND frontend. If you only address one dimension, the plan is incomplete.
 
 ## Working Memory
 You will receive a "Working Memory" block with structured context about the current session:
@@ -96,7 +97,7 @@ Return ONLY a single JSON object (no markdown fences, no explanation) matching t
 }`;
 
 export class Planner {
-  private static readonly MAX_RESEARCH_ITERATIONS = 5;
+  private static readonly MAX_RESEARCH_ITERATIONS = 10;
 
   constructor(private provider: CloudProvider) {}
 
@@ -113,11 +114,16 @@ export class Planner {
       throw new Error('No user message found in request');
     }
 
-    // Build user content with working memory instead of raw chat history
+    // Build user content with working memory AND recent conversation history.
+    // Working memory is a lossy summary — the planner needs the actual user words
+    // to understand the full scope of multi-turn requests.
     const memoryContext = serializeMemory(memory);
-    const userContent = memoryContext
-      ? `${memoryContext}\n\n## Current request\n${lastUserMsg.content}`
-      : lastUserMsg.content;
+    const recentConversation = this.buildConversationContext(req.messages);
+    const sections: string[] = [];
+    if (memoryContext) sections.push(memoryContext);
+    if (recentConversation) sections.push(`## Recent conversation\n${recentConversation}`);
+    sections.push(`## Current request\n${lastUserMsg.content}`);
+    const userContent = sections.join('\n\n');
 
     const envContext = this.getEnvironmentContext();
 
@@ -145,7 +151,107 @@ export class Planner {
     };
 
     const response = await this.provider.createChatCompletion(plannerReq);
-    return this.parsePlan(response.content);
+    const plan = this.parsePlan(response.content);
+
+    // Phase 3: Self-validation — check the plan covers the full scope
+    emit({ stage: 'planning', message: 'Validating plan coverage...' });
+    const validatedPlan = await this.validateCoverage(plan, userContent, researchContext);
+    return validatedPlan;
+  }
+
+  /**
+   * Validate that the plan covers the full scope of the user's request.
+   * Sends the plan back to the planner and asks it to identify gaps.
+   * If gaps are found, regenerates the plan with gap analysis as additional context.
+   */
+  private async validateCoverage(
+    plan: ExecutionPlan,
+    userContent: string,
+    researchContext: string,
+  ): Promise<ExecutionPlan> {
+    const planSummary = plan.steps
+      .map((s, i) => `${i + 1}. ${s.title}: ${s.instruction.slice(0, 200)}`)
+      .join('\n');
+
+    const validationPrompt = `You are reviewing an execution plan to check if it fully covers the user's request.
+
+## User's request
+${userContent}
+
+${researchContext ? `## Research context\n${researchContext}\n` : ''}
+## Proposed plan
+Goal: ${plan.goal}
+Steps:
+${planSummary}
+
+## Your task
+Think carefully about EVERY aspect of what the user asked for. Consider ALL layers and dimensions of the request.
+For example, if someone asks to "set up dual branding for a mobile app", that means:
+- Android configuration (product flavors, build variants)
+- iOS configuration (targets/schemes)
+- App-level theming (colors, fonts, logos)
+- Asset management (icons, splash screens)
+- Configuration files (app names, bundle IDs)
+- Any shared code/component changes
+
+Return a JSON object:
+{
+  "complete": true/false,
+  "gaps": ["list of specific aspects the plan does NOT cover"],
+  "suggestions": ["specific steps that should be added"]
+}
+
+If the plan is comprehensive, return {"complete": true, "gaps": [], "suggestions": []}.
+Be thorough — a plan that only addresses ONE dimension of a multi-dimensional request is incomplete.`;
+
+    try {
+      const response = await this.provider.createChatCompletion({
+        messages: [{ role: 'user', content: validationPrompt }],
+        model: '',
+        temperature: 0,
+        response_format: { type: 'json_object' },
+      });
+
+      let validation: { complete: boolean; gaps: string[]; suggestions: string[] };
+      try {
+        validation = JSON.parse(response.content);
+      } catch {
+        return plan; // Can't parse validation — use original plan
+      }
+
+      if (validation.complete || !validation.gaps?.length) {
+        return plan;
+      }
+
+      // Gaps found — regenerate with the gap analysis
+      const gapContext = `## Plan coverage gaps identified
+The initial plan was reviewed and found to be INCOMPLETE. It missed these aspects:
+${validation.gaps.map((g) => `- ${g}`).join('\n')}
+
+Suggested additions:
+${(validation.suggestions ?? []).map((s) => `- ${s}`).join('\n')}
+
+You MUST create a comprehensive plan that addresses ALL of these gaps in addition to what was already covered.
+Do NOT create a minimal plan — cover the FULL scope of the request.`;
+
+      const retryPrompt = `${gapContext}\n\n## User request\n${userContent}`;
+
+      const retryReq: NormalisedLLMRequest = {
+        messages: [
+          { role: 'system', content: PLANNER_SYSTEM_PROMPT },
+          { role: 'user', content: retryPrompt },
+        ],
+        model: '',
+        temperature: 0.2,
+        response_format: { type: 'json_object' },
+      };
+
+      const retryResponse = await this.provider.createChatCompletion(retryReq);
+      return this.parsePlan(retryResponse.content);
+    } catch {
+      // Validation failed — use the original plan rather than blocking
+      return plan;
+    }
   }
 
   /**
@@ -160,7 +266,7 @@ export class Planner {
     memory?: WorkingMemory,
   ): Promise<string> {
     const knownContext = memory ? `\n\n## Known context from working memory\n${serializeMemory(memory)}` : '';
-    const researchPrompt = `You are preparing to plan a software engineering task. Before creating a plan, you can use tools to gather context.
+    const researchPrompt = `You are preparing to plan a software engineering task. Before creating a plan, you MUST use tools to thoroughly understand the codebase and the FULL scope of what the user is asking.
 
 ## Tools available
 - shell_exec: Run shell commands (git, gh, npm, curl, ls, grep, cat, etc.)
@@ -168,12 +274,22 @@ export class Planner {
 - write_file: Write/create files (DO NOT use this during research)
 
 ## Your goal
-Gather the specific context needed to create precise step instructions. For example:
-- If the task mentions a PR, fetch the PR comments and understand what needs to change
-- If the task mentions files, read the relevant files
-- If the task mentions errors, check logs or run diagnostics
+Understand the COMPLETE scope of the user's request before planning. Think about ALL dimensions:
 
-Keep research focused — only gather what you need. When done, respond with a summary of your findings.
+1. **Explore the project structure first** — run \`find . -type f -name "*.json" -o -name "*.ts" -o -name "*.gradle*" -o -name "*.pbxproj" | head -50\` or similar to understand the codebase layout.
+2. **Identify all layers affected** — e.g. for a mobile app feature: Android config, iOS config, JS/TS code, assets, configs, themes, tests.
+3. **Read relevant existing files** — don't guess what's in them, read them.
+4. **Check for existing patterns** — how does the project already handle similar concerns?
+
+### Scope analysis
+Before finishing research, explicitly list ALL the areas that the user's request touches. For example:
+- "Add dual branding" → Android flavors, iOS targets/schemes, app theming, asset management, bundle IDs, display names, splash screens, icons
+- "Add authentication" → API routes, middleware, database schema, frontend forms, token storage, protected routes
+- "Refactor module X" → all files importing X, tests for X, documentation referencing X
+
+If you find the request is broader than it first appears, investigate ALL the dimensions — not just the most obvious one.
+
+When done, respond with a thorough summary of your findings covering EVERY aspect.
 Do NOT create a plan yet. Just gather and summarize context.
 ${envContext}
 ${systemPrompt ? `\n## Client context\n${systemPrompt.slice(0, 500)}` : ''}${knownContext}
@@ -265,6 +381,29 @@ Combine the step results into a response that directly addresses the user's orig
 
     const response = await this.provider.createChatCompletion(synthesisReq);
     return response.content;
+  }
+
+  /**
+   * Build a conversation context string from recent messages so the planner
+   * can see the full scope of multi-turn requests, not just the last message.
+   * Excludes the very last user message (which is passed separately as "Current request").
+   */
+  private buildConversationContext(messages: NormalisedMessage[]): string {
+    const conversational = messages.filter(
+      (m) => (m.role === 'user' || m.role === 'assistant') && m.content,
+    );
+    // Exclude the last user message — it's already in "Current request"
+    const lastUserIdx = conversational.length - 1;
+    if (lastUserIdx < 1) return '';
+    const prior = conversational.slice(Math.max(0, lastUserIdx - 10), lastUserIdx);
+    if (prior.length === 0) return '';
+    return prior
+      .map((m) => {
+        const prefix = m.role === 'user' ? 'User' : 'Assistant';
+        const limit = m.role === 'user' ? 2000 : 600;
+        return `${prefix}: ${m.content.slice(0, limit)}`;
+      })
+      .join('\n\n');
   }
 
   private getEnvironmentContext(): string {

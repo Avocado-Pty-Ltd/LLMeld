@@ -89,8 +89,9 @@ export class OrchestrationLoop {
 
       const stepStart = Date.now();
       const executor = step.allow_local ? this.executor : (this.fallbackExecutor ?? this.executor);
-      // Enrich executor context with current working memory state
-      const enrichedContext = `${plan.context_for_executor}\n\n${serializeMemory(memory)}`;
+      // Enrich executor context with goal, acceptance criteria, and working memory
+      const goalSection = `## Overall goal\n${plan.goal}\n\n## Acceptance criteria\n${plan.acceptance_criteria.map((c) => `- ${c}`).join('\n')}\n\n## Step ${stepIndex + 1} of ${totalSteps}`;
+      const enrichedContext = `${goalSection}\n\n${plan.context_for_executor}\n\n${serializeMemory(memory)}`;
 
       let result: StepResult | undefined;
       let passed = false;

@@ -48,10 +48,12 @@ export async function buildWorkingMemory(
   // Prepare conversation excerpt for LLM extraction
   const conversationExcerpt = req.messages
     .filter((m) => (m.role === 'user' || m.role === 'assistant') && m.content)
-    .slice(-10)
+    .slice(-20)
     .map((m) => {
       const prefix = m.role === 'user' ? 'User' : 'Assistant';
-      return `${prefix}: ${m.content.slice(0, 400)}`;
+      // Give user messages more room — they carry the intent
+      const limit = m.role === 'user' ? 2000 : 800;
+      return `${prefix}: ${m.content.slice(0, limit)}`;
     })
     .join('\n\n');
 
@@ -67,7 +69,7 @@ export async function buildWorkingMemory(
       ],
       model: '',
       temperature: 0,
-      max_tokens: 500,
+      max_tokens: 2000,
       response_format: { type: 'json_object' },
     });
 
@@ -143,7 +145,8 @@ async function incrementalUpdate(
     .filter(m => m.content)
     .map(m => {
       const prefix = m.role === 'user' ? 'User' : 'Assistant';
-      return `${prefix}: ${m.content.slice(0, 400)}`;
+      const limit = m.role === 'user' ? 2000 : 800;
+      return `${prefix}: ${m.content.slice(0, limit)}`;
     })
     .join('\n\n');
 
@@ -160,7 +163,7 @@ async function incrementalUpdate(
       ],
       model: '',
       temperature: 0,
-      max_tokens: 500,
+      max_tokens: 2000,
       response_format: { type: 'json_object' },
     });
 
