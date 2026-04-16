@@ -1,9 +1,17 @@
 {
   "name": "llmeld",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "Dual-surface API gateway with cloud planner + local executor orchestration",
   "type": "module",
   "main": "dist/index.js",
+  "bin": {
+    "llmeld": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "config.example.yaml",
+    "README.md"
+  ],
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "dev:local-only": "LLMELD_ROUTING_MODE=local tsx watch src/index.ts",
@@ -14,7 +22,8 @@
     "lint": "eslint src/ --ext .ts",
     "lint:fix": "eslint src/ --ext .ts --fix",
     "format": "prettier --write 'src/**/*.ts'",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "tsc"
   },
   "keywords": [
     "llm",
