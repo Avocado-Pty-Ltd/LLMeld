@@ -1,8 +1,10 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
-import { configSchema, type ValidatedConfig } from './schema.js';
+import { config as loadDotenv } from 'dotenv';
+import { configSchema } from './schema.js';
 import type { LLMeldConfig, ProviderConfig } from '../types/config.js';
+import { runOnboardingWizard } from '../onboarding.js';
 
 function resolveApiKey(provider: ProviderConfig): string | undefined {
   if (provider.api_key) return provider.api_key;
@@ -18,13 +20,17 @@ function resolveApiKey(provider: ProviderConfig): string | undefined {
   return undefined;
 }
 
-export function loadConfig(configPath?: string): LLMeldConfig {
+export async function loadConfig(configPath?: string): Promise<LLMeldConfig> {
   const filePath = resolve(configPath ?? process.env.LLMELD_CONFIG ?? 'config.yaml');
 
   if (!existsSync(filePath)) {
-    console.error(`[llmeld] Config error: file not found at ${filePath}`);
-    console.error('[llmeld] Run: cp config.example.yaml config.yaml');
-    process.exit(1);
+    await runOnboardingWizard();
+    // Re-load .env since the wizard may have just created it
+    loadDotenv({ override: true });
+    if (!existsSync(filePath)) {
+      console.error('[llmeld] Config error: onboarding did not create a config file');
+      process.exit(1);
+    }
   }
 
   let raw: unknown;
@@ -76,15 +82,36 @@ export function resolveProviderApiKey(provider: ProviderConfig): string {
 
 export function printStartupSummary(config: LLMeldConfig): void {
   const fallback = config.providers.fallback;
+  const pm = config.routing.planner_models;
+
+  let plannerDesc: string;
+  if (pm?.coding && pm?.general && pm.coding !== pm.general) {
+    plannerDesc = `coding: ${pm.coding}, general: ${pm.general}`;
+  } else if (pm?.coding || pm?.general) {
+    plannerDesc = `${config.providers.planner.type} (${pm.coding || pm.general})`;
+  } else {
+    plannerDesc = `${config.providers.planner.type} (${config.providers.planner.model})`;
+  }
+
+  // Dynamically size the table to fit content
+  const rows: [string, string][] = [
+    ['OpenAI', `:${config.gateway.openai_port}`],
+    ['Anthropic', `:${config.gateway.anthropic_port}`],
+    ['Planner', plannerDesc],
+    ['Executor', `${config.providers.executor.type} (${config.providers.executor.model})`],
+    ['Fallback', fallback ? `${fallback.type} (${fallback.model})` : 'none'],
+    ['Mode', config.routing.default_mode],
+  ];
+
+  const labelWidth = 13;
+  const valueWidth = Math.max(38, ...rows.map(([, v]) => v.length + 2));
   const lines = [
-    `┌─────────────┬──────────────────────────────────────┐`,
-    `│ OpenAI      │ :${String(config.gateway.openai_port).padEnd(37)}│`,
-    `│ Anthropic   │ :${String(config.gateway.anthropic_port).padEnd(37)}│`,
-    `│ Planner     │ ${`${config.providers.planner.type} (${config.providers.planner.model})`.padEnd(37)}│`,
-    `│ Executor    │ ${`${config.providers.executor.type} (${config.providers.executor.model})`.padEnd(37)}│`,
-    `│ Fallback    │ ${(fallback ? `${fallback.type} (${fallback.model})` : 'none').padEnd(37)}│`,
-    `│ Mode        │ ${config.routing.default_mode.padEnd(37)}│`,
-    `└─────────────┴──────────────────────────────────────┘`,
+    `\u250c${'\u2500'.repeat(labelWidth)}\u252c${'\u2500'.repeat(valueWidth)}\u2510`,
+    ...rows.map(
+      ([label, value]) =>
+        `\u2502 ${label.padEnd(labelWidth - 2)} \u2502 ${value.padEnd(valueWidth - 2)} \u2502`,
+    ),
+    `\u2514${'\u2500'.repeat(labelWidth)}\u2534${'\u2500'.repeat(valueWidth)}\u2518`,
   ];
 
   for (const line of lines) {

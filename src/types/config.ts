@@ -34,6 +34,10 @@ export interface RoutingConfig {
   privacy_mode: boolean;
   complex_keywords: string[];
   simple_keywords: string[];
+  planner_models?: {
+    coding?: string;
+    general?: string;
+  };
 }
 
 export interface LoggingConfig {

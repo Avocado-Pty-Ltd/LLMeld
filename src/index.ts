@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import 'dotenv/config';
 import Fastify from 'fastify';
 import { loadConfig, printStartupSummary } from './config/loader.js';
@@ -7,12 +8,17 @@ import { TraceLogger } from './logger/trace.js';
 import { registerOpenAISurface } from './surfaces/openai.js';
 import { registerAnthropicSurface } from './surfaces/anthropic.js';
 import { OllamaProvider } from './providers/ollama.js';
+import { StatsCollector } from './dashboard/stats.js';
+import { DashboardManager } from './dashboard/index.js';
+import { installCapture, uninstallCapture } from './dashboard/console-capture.js';
 
 async function main() {
+  const useDashboard = process.stdout.isTTY === true && !process.argv.includes('--no-dashboard');
+
   console.log('[llmeld] Starting...');
 
-  // Load and validate config
-  const config = loadConfig();
+  // Load and validate config (may trigger onboarding wizard — before dashboard)
+  const config = await loadConfig();
   printStartupSummary(config);
 
   // Create providers
@@ -41,8 +47,9 @@ async function main() {
     fallbackProvider,
   );
 
-  // Create logger
-  const logger = new TraceLogger(config.logging);
+  // Create stats collector and logger
+  const stats = new StatsCollector();
+  const logger = new TraceLogger(config.logging, stats);
 
   // Shared dependencies
   const deps = {
@@ -98,8 +105,20 @@ async function main() {
     process.exit(1);
   }
 
+  // Start dashboard (after servers are up, after onboarding)
+  let dashboard: DashboardManager | undefined;
+  if (useDashboard) {
+    installCapture();
+    dashboard = new DashboardManager(stats, config);
+    dashboard.start();
+  }
+
   // Graceful shutdown
   const shutdown = async () => {
+    if (dashboard) {
+      dashboard.stop();
+      uninstallCapture();
+    }
     console.log('\n[llmeld] Shutting down...');
     await Promise.all([openaiApp.close(), anthropicApp.close()]);
     process.exit(0);
