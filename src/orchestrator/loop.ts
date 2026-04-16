@@ -147,7 +147,7 @@ export class OrchestrationLoop {
             try {
               result = await this.fallbackExecutor.execute(
                 step,
-                plan.context_for_executor,
+                enrichedContext,
                 completedOutputs,
                 onProgress,
                 failCtx,

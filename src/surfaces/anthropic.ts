@@ -193,10 +193,12 @@ function formatProgressLine(event: ProgressEvent): string {
 export function registerAnthropicSurface(app: FastifyInstance, deps: AnthropicSurfaceDeps) {
   const { config, plannerProvider, executorProvider, orchestrator, logger, memoryCache } = deps;
 
-  // Log all incoming requests for debugging
-  app.addHook('onRequest', async (request) => {
-    console.log(`[llmeld] anthropic ← ${request.method} ${request.url}`);
-  });
+  // Log incoming requests only when debug traces are enabled
+  if (config.gateway.debug_traces) {
+    app.addHook('onRequest', async (request) => {
+      logger.log('debug', `anthropic ← ${request.method} ${request.url}`);
+    });
+  }
 
   // Auth hook — accept x-api-key OR Authorization: Bearer
   app.addHook('onRequest', async (request, reply) => {

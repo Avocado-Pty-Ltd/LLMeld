@@ -27,6 +27,7 @@ export class MemoryCache {
       return undefined;
     }
 
+    entry.lastAccess = Date.now();
     return entry;
   }
 

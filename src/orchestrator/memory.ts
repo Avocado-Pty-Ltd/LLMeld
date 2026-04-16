@@ -317,8 +317,19 @@ export function compactMessages(
   const systemMsg = messages.find((m) => m.role === 'system');
   const nonSystemMessages = messages.filter((m) => m.role !== 'system');
 
-  // Keep only last 2 user/assistant exchanges + any trailing tool messages
-  const recentMessages = nonSystemMessages.slice(-4);
+  // Find the last 2 user/assistant exchanges, then include any trailing tool messages
+  const userAssistantIndices: number[] = [];
+  for (let i = 0; i < nonSystemMessages.length; i++) {
+    if (nonSystemMessages[i].role === 'user' || nonSystemMessages[i].role === 'assistant') {
+      userAssistantIndices.push(i);
+    }
+  }
+
+  // Take from the start of the 4th-to-last user/assistant message (2 exchanges = 4 msgs)
+  const cutoff = userAssistantIndices.length > 4
+    ? userAssistantIndices[userAssistantIndices.length - 4]
+    : 0;
+  const recentMessages = nonSystemMessages.slice(cutoff);
 
   // Build compacted message list
   const compacted = [];
@@ -329,7 +340,7 @@ export function compactMessages(
     : serialized;
   compacted.push({ role: 'system' as const, content: systemContent });
 
-  // Recent messages
+  // Recent messages (includes tool messages that belong to the exchanges)
   compacted.push(...recentMessages);
 
   return { ...req, messages: compacted };
@@ -394,22 +405,48 @@ function parseMemoryResponse(content: string): Partial<WorkingMemory> {
 
   const parsed = JSON.parse(jsonStr);
 
+  const hasErrorContext = Object.prototype.hasOwnProperty.call(parsed, 'error_context');
+  const hasProjectStack =
+    parsed.project_stack !== undefined &&
+    parsed.project_stack !== null &&
+    typeof parsed.project_stack === 'object';
+
   return {
-    current_goal: typeof parsed.current_goal === 'string' ? parsed.current_goal : '',
-    acceptance_criteria: Array.isArray(parsed.acceptance_criteria) ? parsed.acceptance_criteria : [],
-    active_files: Array.isArray(parsed.active_files) ? parsed.active_files : [],
-    key_decisions: Array.isArray(parsed.key_decisions) ? parsed.key_decisions : [],
+    current_goal: typeof parsed.current_goal === 'string' ? parsed.current_goal : undefined,
+    acceptance_criteria: Array.isArray(parsed.acceptance_criteria)
+      ? parsed.acceptance_criteria
+      : undefined,
+    active_files: Array.isArray(parsed.active_files) ? parsed.active_files : undefined,
+    key_decisions: Array.isArray(parsed.key_decisions) ? parsed.key_decisions : undefined,
     discovered_constraints: Array.isArray(parsed.discovered_constraints)
       ? parsed.discovered_constraints
-      : [],
-    error_context: parsed.error_context ?? null,
-    project_stack: {
-      language: parsed.project_stack?.language ?? null,
-      framework: parsed.project_stack?.framework ?? null,
-      test_runner: parsed.project_stack?.test_runner ?? null,
-      package_manager: parsed.project_stack?.package_manager ?? null,
-      linting: parsed.project_stack?.linting ?? null,
-    },
+      : undefined,
+    error_context: hasErrorContext ? (parsed.error_context ?? null) : undefined,
+    project_stack: hasProjectStack
+      ? {
+          language:
+            parsed.project_stack.language === null || typeof parsed.project_stack.language === 'string'
+              ? parsed.project_stack.language
+              : undefined,
+          framework:
+            parsed.project_stack.framework === null || typeof parsed.project_stack.framework === 'string'
+              ? parsed.project_stack.framework
+              : undefined,
+          test_runner:
+            parsed.project_stack.test_runner === null || typeof parsed.project_stack.test_runner === 'string'
+              ? parsed.project_stack.test_runner
+              : undefined,
+          package_manager:
+            parsed.project_stack.package_manager === null ||
+            typeof parsed.project_stack.package_manager === 'string'
+              ? parsed.project_stack.package_manager
+              : undefined,
+          linting:
+            parsed.project_stack.linting === null || typeof parsed.project_stack.linting === 'string'
+              ? parsed.project_stack.linting
+              : undefined,
+        }
+      : undefined,
   };
 }
 
