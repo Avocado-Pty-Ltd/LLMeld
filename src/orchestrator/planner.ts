@@ -2,7 +2,9 @@ import { execSync } from 'child_process';
 import type { CloudProvider } from '../providers/base.js';
 import type { NormalisedLLMRequest, NormalisedMessage } from '../types/normalised.js';
 import type { ExecutionPlan, ProgressEvent } from '../types/plan.js';
+import type { WorkingMemory } from '../types/working-memory.js';
 import { TOOL_DEFINITIONS, executeTool } from './tools.js';
+import { serializeMemory } from './memory.js';
 
 const PLANNER_SYSTEM_PROMPT = `You are a software engineering task planner. Your job is to decompose a user's request into a sequence of focused, self-contained steps that a smaller AI model can execute independently.
 
@@ -45,6 +47,18 @@ All tools run in the current working directory on the user's machine.
 8. For code tasks: each step should produce ONE concrete artifact (a single function, one file edit, one command).
 9. Include relevant code/file paths from the conversation in step instructions — the executor cannot see prior messages.
 
+## Working Memory
+You will receive a "Working Memory" block with structured context about the current session:
+- Repository and git context
+- The user's current goal and acceptance criteria
+- Files recently read or modified
+- Key architectural decisions made so far
+- Known constraints and project conventions
+- Any recent errors and what was tried
+
+Use this context to create precise, informed step instructions. Reference specific file paths,
+decisions, and constraints from the working memory in your step instructions.
+
 ## Output format
 Return ONLY a single JSON object (no markdown fences, no explanation) matching this schema:
 {
@@ -72,6 +86,7 @@ export class Planner {
 
   async createPlan(
     req: NormalisedLLMRequest,
+    memory: WorkingMemory,
     onProgress?: (event: ProgressEvent) => void,
   ): Promise<ExecutionPlan> {
     const emit = onProgress ?? (() => {});
@@ -82,29 +97,17 @@ export class Planner {
       throw new Error('No user message found in request');
     }
 
-    // Build conversation context from recent messages
-    const recentMessages = req.messages
-      .filter((m) => (m.role === 'assistant' || m.role === 'user') && m.content)
-      .slice(-6)
-      .map((m) => {
-        const prefix = m.role === 'user' ? 'User' : 'Assistant';
-        return `${prefix}: ${m.content.slice(0, 800)}`;
-      })
-      .join('\n\n');
-
-    const contextMessages = recentMessages
-      ? recentMessages.split('\n\n').slice(0, -1).join('\n\n')
-      : '';
-
-    const userContent = contextMessages
-      ? `## Recent conversation context\n${contextMessages}\n\n## Current request\n${lastUserMsg.content}`
+    // Build user content with working memory instead of raw chat history
+    const memoryContext = serializeMemory(memory);
+    const userContent = memoryContext
+      ? `${memoryContext}\n\n## Current request\n${lastUserMsg.content}`
       : lastUserMsg.content;
 
     const envContext = this.getEnvironmentContext();
 
     // Phase 1: Research — let the planner use tools to gather context
     emit({ stage: 'planning', message: 'Researching task context...' });
-    const researchContext = await this.research(userContent, envContext, systemMsg?.content);
+    const researchContext = await this.research(userContent, envContext, systemMsg?.content, memory);
 
     // Phase 2: Plan — create the plan with research context embedded
     emit({ stage: 'planning', message: 'Creating execution plan...' });
@@ -138,7 +141,9 @@ export class Planner {
     userContent: string,
     envContext: string,
     systemPrompt?: string,
+    memory?: WorkingMemory,
   ): Promise<string> {
+    const knownContext = memory ? `\n\n## Known context from working memory\n${serializeMemory(memory)}` : '';
     const researchPrompt = `You are preparing to plan a software engineering task. Before creating a plan, you can use tools to gather context.
 
 ## Tools available
@@ -155,7 +160,7 @@ Gather the specific context needed to create precise step instructions. For exam
 Keep research focused — only gather what you need. When done, respond with a summary of your findings.
 Do NOT create a plan yet. Just gather and summarize context.
 ${envContext}
-${systemPrompt ? `\n## Client context\n${systemPrompt.slice(0, 500)}` : ''}
+${systemPrompt ? `\n## Client context\n${systemPrompt.slice(0, 500)}` : ''}${knownContext}
 
 ## Task to research
 ${userContent}`;
@@ -209,6 +214,7 @@ ${userContent}`;
     originalMessages: NormalisedLLMRequest['messages'],
     plan: ExecutionPlan,
     stepResults: Array<{ title: string; output: string }>,
+    memory?: WorkingMemory,
   ): Promise<string> {
     const resultsText = stepResults
       .map((r, i) => `### Step ${i + 1}: ${r.title}\n${r.output}`)
@@ -217,6 +223,8 @@ ${userContent}`;
     const originalUserMsg = [...originalMessages]
       .reverse()
       .find((m) => m.role === 'user')?.content ?? '';
+
+    const memorySection = memory ? `\n\n## Session context\n${serializeMemory(memory)}` : '';
 
     const synthesisReq: NormalisedLLMRequest = {
       messages: [
@@ -233,7 +241,7 @@ Combine the step results into a response that directly addresses the user's orig
         },
         {
           role: 'user',
-          content: `## Original request\n${originalUserMsg}\n\n## Plan goal\n${plan.goal}\n\n## Step results\n${resultsText}`,
+          content: `## Original request\n${originalUserMsg}\n\n## Plan goal\n${plan.goal}\n\n## Step results\n${resultsText}${memorySection}`,
         },
       ],
       model: '',
