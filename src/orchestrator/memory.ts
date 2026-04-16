@@ -429,7 +429,15 @@ function parseMemoryResponse(content: string): Partial<WorkingMemory> {
     discovered_constraints: Array.isArray(parsed.discovered_constraints)
       ? parsed.discovered_constraints
       : undefined,
-    error_context: hasErrorContext ? (parsed.error_context ?? null) : undefined,
+    error_context: hasErrorContext && typeof parsed.error_context === 'object' && parsed.error_context !== null
+      ? {
+          description: typeof parsed.error_context.description === 'string' ? parsed.error_context.description : '',
+          attempted_fix: typeof parsed.error_context.attempted_fix === 'string' ? parsed.error_context.attempted_fix : '',
+          resolved: Boolean(parsed.error_context.resolved),
+        }
+      : hasErrorContext && parsed.error_context === null
+        ? null
+        : undefined,
     project_stack: hasProjectStack
       ? {
           language:
