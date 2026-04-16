@@ -47,6 +47,17 @@ export interface LoggingConfig {
   emit_token_costs: boolean;
 }
 
+export interface MemoryConfig {
+  enabled: boolean;
+  file_path: string;
+  max_inject_tokens: number;
+  extraction_provider: 'executor' | 'planner' | 'fallback';
+  max_entries: number;
+  staleness_days: number;
+  inject_on_direct: boolean;
+  auto_extract: boolean;
+}
+
 export interface LLMeldConfig {
   gateway: GatewayConfig;
   providers: {
@@ -56,4 +67,5 @@ export interface LLMeldConfig {
   };
   routing: RoutingConfig;
   logging: LoggingConfig;
+  memory: MemoryConfig;
 }

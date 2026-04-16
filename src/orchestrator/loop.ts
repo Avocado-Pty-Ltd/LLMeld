@@ -2,6 +2,7 @@ import type { CloudProvider } from '../providers/base.js';
 import type { NormalisedLLMRequest, NormalisedLLMResponse } from '../types/normalised.js';
 import type { RoutingConfig } from '../types/config.js';
 import type { ExecutionPlan, StepResult, ProgressEvent } from '../types/plan.js';
+import type { MemoryManager } from '../memory/manager.js';
 import { Planner } from './planner.js';
 import { Executor } from './executor.js';
 import { verifyStep } from './verifier.js';
@@ -25,18 +26,21 @@ export class OrchestrationLoop {
   private planner: Planner;
   private executor: Executor;
   private fallbackExecutor?: Executor;
+  private memoryManager?: MemoryManager;
 
   constructor(
     plannerProvider: CloudProvider,
     executorProvider: CloudProvider,
     private routingConfig: RoutingConfig,
     fallbackProvider?: CloudProvider,
+    memoryManager?: MemoryManager,
   ) {
     this.planner = new Planner(plannerProvider);
     this.executor = new Executor(executorProvider);
     if (fallbackProvider) {
       this.fallbackExecutor = new Executor(fallbackProvider);
     }
+    this.memoryManager = memoryManager;
   }
 
   async execute(
@@ -52,6 +56,15 @@ export class OrchestrationLoop {
       step_results: [],
       total_tokens: 0,
     };
+
+    // Inject memory into planner and executor
+    if (this.memoryManager) {
+      this.planner.setMemoryBlock(this.memoryManager.getPlannerInjection());
+      this.executor.setMemoryBlock(this.memoryManager.getExecutorInjection());
+      if (this.fallbackExecutor) {
+        this.fallbackExecutor.setMemoryBlock(this.memoryManager.getExecutorInjection());
+      }
+    }
 
     let plan: ExecutionPlan;
     try {
@@ -210,6 +223,18 @@ export class OrchestrationLoop {
         total_tokens: trace.total_tokens,
       },
     };
+
+    // Fire-and-forget memory extraction
+    if (this.memoryManager) {
+      const lastUserMsg = [...req.messages].reverse().find((m) => m.role === 'user');
+      if (lastUserMsg) {
+        this.memoryManager.extractAndSave({
+          userMessage: lastUserMsg.content,
+          assistantResponse: synthesizedContent,
+          trace,
+        }).catch(() => { /* extraction failure is non-fatal */ });
+      }
+    }
 
     return { response, trace };
   }

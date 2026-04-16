@@ -17,6 +17,10 @@ function formatTokens(n: number): string {
   return String(n);
 }
 
+function truncateModel(model: string, maxLen: number): string {
+  return model.length > maxLen ? model.slice(0, maxLen - 1) + '\u2026' : model;
+}
+
 function formatMs(ms: number): string {
   if (ms >= 60_000) return `${(ms / 60_000).toFixed(1)}m`;
   if (ms >= 1_000) return `${(ms / 1_000).toFixed(1)}s`;
@@ -72,6 +76,16 @@ export function renderStatsView(
   lines.push(row(title, w));
   const controls = ` ${chalk.dim(`Uptime: ${formatUptime(uptime)}`)}  ${chalk.yellow('Q')}${chalk.dim(':quit')}  ${chalk.yellow('L')}${chalk.dim(':logs')}  ${chalk.yellow('C')}${chalk.dim(':clear')} `;
   lines.push(row(controls, w));
+
+  // Model info
+  const plannerModel = truncateModel(config.providers.planner.model, 28);
+  const executorModel = truncateModel(config.providers.executor.model, 28);
+  const fallbackPart = config.providers.fallback
+    ? `  ${chalk.dim('Fallback:')} ${chalk.white(truncateModel(config.providers.fallback.model, 20))}`
+    : '';
+  const modelsLine = ` ${chalk.dim('Planner:')} ${chalk.white(plannerModel)}  ${chalk.dim('Executor:')} ${chalk.white(executorModel)}${fallbackPart} `;
+  lines.push(row(modelsLine, w));
+
   lines.push(separator(w));
 
   // Stats summary

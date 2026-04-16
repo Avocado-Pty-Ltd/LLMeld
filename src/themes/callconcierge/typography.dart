@@ -1,0 +1,1 @@
+{'fontSize': 14.0, 'fontWeight': 'FontWeight.medium', 'color': 'CallConciergeColors.onPrimary'}

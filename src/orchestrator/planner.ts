@@ -22,7 +22,18 @@ The executor CANNOT:
 - Run long-lived processes or servers
 - Display images or GUIs
 
-When creating steps, feel free to instruct the executor to use shell commands, read files, or write files as needed.
+When creating steps, instruct the executor to use shell commands, read files, or write files as needed.
+
+## CRITICAL: The executor ACTS — it does not advise
+The executor has real tools and runs on the user's machine. NEVER create steps that tell the user to do something manually. The executor must DO the work itself.
+- WRONG: "Tell the user to run \`git push origin main\`"
+- WRONG: "Instruct the user to stage and commit their changes"
+- WRONG: "The user should run npm install"
+- RIGHT: "Run \`git push origin main\` using shell_exec"
+- RIGHT: "Stage all changes and commit with shell_exec: \`git add . && git commit -m 'message'\`"
+- RIGHT: "Run \`npm install\` using shell_exec"
+
+If the task asks to perform an action (push, commit, deploy, install, create a file), the step must USE TOOLS to perform it — not describe what the user should do.
 
 ## Working environment
 All tools run in the current working directory on the user's machine.
@@ -67,8 +78,14 @@ Return ONLY a single JSON object (no markdown fences, no explanation) matching t
 
 export class Planner {
   private static readonly MAX_RESEARCH_ITERATIONS = 5;
+  private memoryBlock = '';
 
   constructor(private provider: CloudProvider) {}
+
+  /** Set the memory injection block for this planning cycle. */
+  setMemoryBlock(block: string): void {
+    this.memoryBlock = block;
+  }
 
   async createPlan(
     req: NormalisedLLMRequest,
@@ -113,8 +130,16 @@ export class Planner {
       ? `## Research findings\nBefore planning, I gathered this context:\n${researchContext}\n\n## User request\n${userContent}`
       : userContent;
 
+    const systemParts = [PLANNER_SYSTEM_PROMPT, envContext];
+    if (this.memoryBlock) {
+      systemParts.push('\n\n' + this.memoryBlock);
+    }
+    if (systemMsg) {
+      systemParts.push(`\n\n## Client system prompt\n${systemMsg.content.slice(0, 1000)}`);
+    }
+
     const messages: NormalisedMessage[] = [
-      { role: 'system', content: PLANNER_SYSTEM_PROMPT + envContext + (systemMsg ? `\n\n## Client system prompt\n${systemMsg.content.slice(0, 1000)}` : '') },
+      { role: 'system', content: systemParts.join('') },
       { role: 'user', content: planPrompt },
     ];
 
@@ -229,7 +254,8 @@ Combine the step results into a response that directly addresses the user's orig
 - If steps produced partial results, combine them logically.
 - If any step had issues, note them briefly.
 - Match the response format the user would expect (code blocks for code, prose for explanations).
-- Do NOT mention the planning/execution process — respond as if you did the work yourself.`,
+- Do NOT mention the planning/execution process — respond as if you did the work yourself.
+- If steps performed actions (committed, pushed, wrote files, ran commands), report what was DONE — not what the user should do. Say "I pushed the branch" not "you should push the branch".`,
         },
         {
           role: 'user',

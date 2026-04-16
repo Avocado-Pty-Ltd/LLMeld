@@ -5,6 +5,7 @@ import { loadConfig, printStartupSummary } from './config/loader.js';
 import { createProvider } from './providers/factory.js';
 import { OrchestrationLoop } from './orchestrator/loop.js';
 import { TraceLogger } from './logger/trace.js';
+import { MemoryManager } from './memory/manager.js';
 import { registerOpenAISurface } from './surfaces/openai.js';
 import { registerAnthropicSurface } from './surfaces/anthropic.js';
 import { OllamaProvider } from './providers/ollama.js';
@@ -39,12 +40,27 @@ async function main() {
     }
   }
 
+  // Create memory manager if enabled
+  let memoryManager: MemoryManager | undefined;
+  if (config.memory.enabled) {
+    const extractionProviderMap = {
+      executor: executorProvider,
+      planner: plannerProvider,
+      fallback: fallbackProvider,
+    };
+    const extractionProvider = extractionProviderMap[config.memory.extraction_provider] ?? executorProvider;
+    memoryManager = new MemoryManager(config.memory, extractionProvider);
+    memoryManager.load();
+    console.log(`[llmeld] Shared memory enabled (${config.memory.file_path})`);
+  }
+
   // Create orchestrator
   const orchestrator = new OrchestrationLoop(
     plannerProvider,
     executorProvider,
     config.routing,
     fallbackProvider,
+    memoryManager,
   );
 
   // Create stats collector and logger
@@ -59,6 +75,7 @@ async function main() {
     fallbackProvider,
     orchestrator,
     logger,
+    memoryManager,
   };
 
   // Create OpenAI surface

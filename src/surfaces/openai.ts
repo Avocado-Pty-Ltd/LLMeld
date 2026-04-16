@@ -4,6 +4,7 @@ import type { LLMeldConfig } from '../types/config.js';
 import type { CloudProvider } from '../providers/base.js';
 import type { OrchestrationLoop } from '../orchestrator/loop.js';
 import type { TraceLogger } from '../logger/trace.js';
+import type { MemoryManager } from '../memory/manager.js';
 import type { NormalisedLLMRequest, NormalisedLLMResponse } from '../types/normalised.js';
 import type { ProgressEvent } from '../types/plan.js';
 import { TOOL_DEFINITIONS, executeTool } from '../orchestrator/tools.js';
@@ -19,6 +20,18 @@ export interface OpenAISurfaceDeps {
   fallbackProvider?: CloudProvider;
   orchestrator: OrchestrationLoop;
   logger: TraceLogger;
+  memoryManager?: MemoryManager;
+}
+
+/** Inject a memory block into the system message of a normalised request. */
+function injectMemoryIntoMessages(req: NormalisedLLMRequest, memoryBlock: string): void {
+  if (!memoryBlock) return;
+  const systemMsg = req.messages.find((m) => m.role === 'system');
+  if (systemMsg) {
+    systemMsg.content += '\n\n' + memoryBlock;
+  } else {
+    req.messages.unshift({ role: 'system', content: memoryBlock });
+  }
 }
 
 /** Run a direct request through the executor with an agentic tool-calling loop. */
@@ -238,7 +251,7 @@ function toSSEStream(response: NormalisedLLMResponse, modelAlias: string): strin
 }
 
 export function registerOpenAISurface(app: FastifyInstance, deps: OpenAISurfaceDeps) {
-  const { config, plannerProvider, executorProvider, orchestrator, logger } = deps;
+  const { config, plannerProvider, executorProvider, orchestrator, logger, memoryManager } = deps;
 
   // Auth hook
   app.addHook('onRequest', async (request, reply) => {
@@ -291,61 +304,79 @@ export function registerOpenAISurface(app: FastifyInstance, deps: OpenAISurfaceD
           'Connection': 'keep-alive',
         });
 
-        const onProgress = (event: ProgressEvent) => {
-          const line = formatProgressLine(event);
-          if (line) {
-            writeSSEChunk(raw, sseId, modelAlias, line);
+        try {
+          const onProgress = (event: ProgressEvent) => {
+            const line = formatProgressLine(event);
+            if (line && !raw.writableEnded) {
+              writeSSEChunk(raw, sseId, modelAlias, line);
+            }
+          };
+
+          const result = await orchestrator.execute(normalised, onProgress);
+
+          // Send the synthesized content
+          if (result.response.content) {
+            writeSSEChunk(raw, sseId, modelAlias, result.response.content);
           }
-        };
 
-        const result = await orchestrator.execute(normalised, onProgress);
-
-        // Send the synthesized content
-        if (result.response.content) {
-          writeSSEChunk(raw, sseId, modelAlias, result.response.content);
-        }
-
-        // Send tool calls if present
-        if (result.response.tool_calls) {
-          for (const tc of result.response.tool_calls) {
-            const toolChunk = `data: ${JSON.stringify({
-              id: sseId,
-              object: 'chat.completion.chunk',
-              created: Math.floor(Date.now() / 1000),
-              model: modelAlias,
-              choices: [
-                {
-                  index: 0,
-                  delta: {
-                    tool_calls: [
-                      {
-                        index: 0,
-                        id: tc.id,
-                        type: 'function',
-                        function: { name: tc.function.name, arguments: tc.function.arguments },
-                      },
-                    ],
+          // Send tool calls if present
+          if (result.response.tool_calls) {
+            for (const tc of result.response.tool_calls) {
+              const toolChunk = `data: ${JSON.stringify({
+                id: sseId,
+                object: 'chat.completion.chunk',
+                created: Math.floor(Date.now() / 1000),
+                model: modelAlias,
+                choices: [
+                  {
+                    index: 0,
+                    delta: {
+                      tool_calls: [
+                        {
+                          index: 0,
+                          id: tc.id,
+                          type: 'function',
+                          function: { name: tc.function.name, arguments: tc.function.arguments },
+                        },
+                      ],
+                    },
+                    finish_reason: null,
                   },
-                  finish_reason: null,
-                },
-              ],
-            })}\n\n`;
-            raw.write(toolChunk);
+                ],
+              })}\n\n`;
+              raw.write(toolChunk);
+            }
           }
+
+          writeSSEFinish(raw, sseId, modelAlias, result.response.usage);
+
+          logger.logRequest({
+            trace_id: traceId,
+            timestamp: new Date().toISOString(),
+            surface: 'openai',
+            route_decision: routeDecision,
+            orchestration: result.trace,
+            latency_ms: Date.now() - start,
+          });
+        } catch (streamErr) {
+          // Headers already sent — stream the error as an SSE event and close
+          const errMsg = streamErr instanceof Error ? streamErr.message : 'Internal server error';
+          if (!raw.writableEnded) {
+            writeSSEChunk(raw, sseId, modelAlias, `\n\n[Error: ${errMsg}]`);
+            writeSSEFinish(raw, sseId, modelAlias);
+          }
+
+          logger.logRequest({
+            trace_id: traceId,
+            timestamp: new Date().toISOString(),
+            surface: 'openai',
+            route_decision: routeDecision,
+            latency_ms: Date.now() - start,
+            error: errMsg,
+          });
         }
 
-        writeSSEFinish(raw, sseId, modelAlias, result.response.usage);
-        raw.end();
-
-        logger.logRequest({
-          trace_id: traceId,
-          timestamp: new Date().toISOString(),
-          surface: 'openai',
-          route_decision: routeDecision,
-          orchestration: result.trace,
-          latency_ms: Date.now() - start,
-        });
-
+        if (!raw.writableEnded) raw.end();
         return reply;
       }
 
@@ -359,10 +390,16 @@ export function registerOpenAISurface(app: FastifyInstance, deps: OpenAISurfaceD
         orchestrationTrace = result.trace;
       } else if (routeDecision.provider === 'executor') {
         // Direct executor path — agentic loop with tool support
+        if (memoryManager && config.memory.inject_on_direct) {
+          injectMemoryIntoMessages(normalised, memoryManager.getDirectInjection());
+        }
         normalised.tools = TOOL_DEFINITIONS;
         normalised.tool_choice = 'auto';
         response = await runAgenticDirect(executorProvider, normalised);
       } else {
+        if (memoryManager && config.memory.inject_on_direct) {
+          injectMemoryIntoMessages(normalised, memoryManager.getDirectInjection());
+        }
         const provider = plannerProvider;
         response = await provider.createChatCompletion(normalised);
       }
@@ -375,6 +412,17 @@ export function registerOpenAISurface(app: FastifyInstance, deps: OpenAISurfaceD
         orchestration: orchestrationTrace,
         latency_ms: Date.now() - start,
       });
+
+      // Fire-and-forget memory extraction for direct paths
+      if (memoryManager && routeDecision.path === 'direct') {
+        const lastUserMsg = [...normalised.messages].reverse().find((m) => m.role === 'user');
+        if (lastUserMsg && response.content) {
+          memoryManager.extractAndSave({
+            userMessage: lastUserMsg.content,
+            assistantResponse: response.content,
+          }).catch(() => { /* non-fatal */ });
+        }
+      }
 
       if (isStreaming) {
         const ssePayload = toSSEStream(response, config.gateway.model_alias);

@@ -17,6 +17,7 @@ LLMeld sits between your AI-powered tools and your model providers. It exposes b
 - **Automatic Fallback**: Failed local executions gracefully escalate to a cloud fallback provider
 - **Privacy Mode**: Block all cloud escalation for sensitive environments
 - **TUI Dashboard**: Live terminal dashboard with request stats, latency tracking, cost estimates, and scrollable log viewer
+- **Shared Memory**: Persistent knowledge across requests — project conventions, orchestration hints, execution learnings, and conversation memory auto-accumulate in a human-editable markdown file
 - **Interactive Onboarding**: Setup wizard auto-detects available Ollama models and walks you through first-time configuration
 - **Configuration-Driven**: Single YAML config for providers, routing, and logging
 - **Token Cost Logging**: Estimated token costs in structured trace logs
@@ -81,6 +82,7 @@ Key configuration areas:
 - **Providers**: Planner (cloud), executor (local), and fallback models
 - **Routing**: Mode selection, complexity thresholds, privacy mode
 - **Logging**: Level, format, trace file, token cost tracking
+- **Memory**: Shared memory for cross-request knowledge persistence (disabled by default)
 
 ## Quick Start
 
@@ -155,6 +157,7 @@ src/
 ├── config/          # Configuration loading, validation, and Zod schema
 ├── dashboard/       # TUI dashboard (stats, renderer, log viewer, key handler)
 ├── logger/          # Structured trace logging
+├── memory/          # Shared memory system (types, format, pruner, extractor, manager)
 ├── normaliser/      # Request/response format normalisation
 ├── orchestrator/    # Planner-executor loop, tools, and verification
 ├── providers/       # Provider implementations (OpenRouter, Anthropic, Ollama)
@@ -241,6 +244,9 @@ logging:
   format: pretty
   trace_file: ./logs/traces.jsonl
   emit_token_costs: true
+
+memory:
+  enabled: false   # Set to true to enable shared memory
 ```
 
 See `config.example.yaml` for the full reference with all options and comments.
@@ -267,6 +273,51 @@ To disable the dashboard and use plain console output:
 ```bash
 pnpm dev -- --no-dashboard
 ```
+
+## Shared Memory
+
+LLMeld can maintain a persistent memory file (`.llmeld/memory.md`) that both the planner and executor access across requests. This lets the models "meld" over time — learning your project's conventions, accumulating orchestration insights, and remembering past work.
+
+### What it stores
+
+| Category | Purpose | Default TTL |
+|----------|---------|-------------|
+| **Project Knowledge** | Architecture, conventions, file structure | Permanent (high confidence) |
+| **Shared Vocabulary** | Consistent terms and naming patterns | Permanent |
+| **Orchestration Hints** | How planner should write instructions for executor | Permanent (high) / 90d (medium) |
+| **Execution Learnings** | Step failures, timeouts, what worked | 30 days |
+| **Conversation Memory** | Completed tasks, decisions, preferences | 30 days |
+
+### How it works
+
+1. After each request, LLMeld asynchronously extracts noteworthy facts using the extraction provider (local executor by default — zero cloud cost)
+2. Before each request, relevant memory is injected into the planner's system prompt (full token budget) and executor's user prompt (half budget)
+3. Entries are prioritised by type (vocabulary first, then project knowledge, then hints) and confidence
+4. Expired entries are automatically pruned; a hard cap prevents bloat
+
+### Enabling memory
+
+Add to your `config.yaml`:
+
+```yaml
+memory:
+  enabled: true
+```
+
+All other fields have sensible defaults. The memory file is plain markdown, human-editable, and git-friendly. See `config.example.yaml` for the full reference.
+
+### Configuration options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `enabled` | `false` | Must explicitly enable |
+| `file_path` | `./.llmeld/memory.md` | Path to the memory file |
+| `max_inject_tokens` | `2000` | Token budget for injection (~15% overhead) |
+| `extraction_provider` | `executor` | Which provider extracts facts (local = free) |
+| `max_entries` | `100` | Hard cap, triggers pruning |
+| `staleness_days` | `30` | Conversation/learning entries expire |
+| `inject_on_direct` | `true` | Also inject on direct-path requests |
+| `auto_extract` | `true` | Auto-extract from responses |
 
 ## Cost Analysis
 

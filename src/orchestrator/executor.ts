@@ -16,6 +16,7 @@ You have access to these tools:
 Use tools when the task requires interacting with the filesystem, running commands, or reading/writing files. For pure text generation tasks (writing code, explanations, analysis), respond directly without tools.
 
 ## Requirements
+- **ACT, don't advise.** If the instruction says to run a command, commit, push, write a file, or perform any action — USE YOUR TOOLS to do it. Never tell the user to do it themselves. You have real tools that execute on the user's machine.
 - Produce ONLY the requested output. Do not explain your reasoning unless the instruction asks for an explanation.
 - If you need to write code, write complete, working code — not pseudocode or partial snippets.
 - If you are unsure about something, state your uncertainty clearly.
@@ -24,7 +25,14 @@ Use tools when the task requires interacting with the filesystem, running comman
 After your main output, on a new line, rate your confidence as one of: CONFIDENCE:high, CONFIDENCE:medium, CONFIDENCE:low`;
 
 export class Executor {
+  private memoryBlock = '';
+
   constructor(private provider: CloudProvider) {}
+
+  /** Set the memory injection block for this execution cycle. */
+  setMemoryBlock(block: string): void {
+    this.memoryBlock = block;
+  }
 
   async execute(
     step: PlanStep,
@@ -73,7 +81,9 @@ ${failureContext.partialOutput ? `**Partial output:**\n${failureContext.partialO
 Learn from this failure — avoid repeating the same approach if it clearly didn't work.`;
     }
 
-    const prompt = `## Background context
+    const memorySection = this.memoryBlock ? `${this.memoryBlock}\n\n` : '';
+
+    const prompt = `${memorySection}## Background context
 ${contextForExecutor}
 
 ## Your step

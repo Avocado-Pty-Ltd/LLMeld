@@ -49,6 +49,17 @@ const loggingSchema = z.object({
   emit_token_costs: z.boolean().default(true),
 });
 
+const memorySchema = z.object({
+  enabled: z.boolean().default(false),
+  file_path: z.string().default('./.llmeld/memory.md'),
+  max_inject_tokens: z.number().positive().default(2000),
+  extraction_provider: z.enum(['executor', 'planner', 'fallback']).default('executor'),
+  max_entries: z.number().positive().default(100),
+  staleness_days: z.number().positive().default(30),
+  inject_on_direct: z.boolean().default(true),
+  auto_extract: z.boolean().default(true),
+});
+
 export const configSchema = z.object({
   gateway: gatewaySchema.optional().transform((v) => gatewaySchema.parse(v ?? {})),
   providers: z.object({
@@ -58,6 +69,7 @@ export const configSchema = z.object({
   }),
   routing: routingSchema.optional().transform((v) => routingSchema.parse(v ?? {})),
   logging: loggingSchema.optional().transform((v) => loggingSchema.parse(v ?? {})),
+  memory: memorySchema.optional().transform((v) => memorySchema.parse(v ?? {})),
 });
 
 export type ValidatedConfig = z.infer<typeof configSchema>;

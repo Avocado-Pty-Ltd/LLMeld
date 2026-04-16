@@ -97,3 +97,24 @@ logging:
   trace_file: "./logs/traces.jsonl"
   # Include estimated token costs in trace logs
   emit_token_costs: true
+
+# Shared memory — persistent knowledge across requests
+# Both planner and executor can access this to improve over time.
+# The memory file is plain markdown, human-editable, and git-friendly.
+memory:
+  # Must explicitly enable (default: false)
+  enabled: false
+  # Path to the memory markdown file
+  file_path: "./.llmeld/memory.md"
+  # Max tokens to inject into prompts (~15% overhead on planner)
+  max_inject_tokens: 2000
+  # Which provider runs the extraction LLM call ("executor" = local, zero cloud cost)
+  extraction_provider: "executor"
+  # Hard cap on total entries — triggers pruning when exceeded
+  max_entries: 100
+  # Conversation and learning entries expire after this many days
+  staleness_days: 30
+  # Also inject memory on direct-path (non-orchestrated) requests
+  inject_on_direct: true
+  # Auto-extract facts from each request/response cycle (runs async)
+  auto_extract: true
