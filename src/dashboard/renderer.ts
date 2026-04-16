@@ -77,13 +77,19 @@ export function renderStatsView(
   const controls = ` ${chalk.dim(`Uptime: ${formatUptime(uptime)}`)}  ${chalk.yellow('Q')}${chalk.dim(':quit')}  ${chalk.yellow('L')}${chalk.dim(':logs')}  ${chalk.yellow('C')}${chalk.dim(':clear')} `;
   lines.push(row(controls, w));
 
-  // Model info
-  const plannerModel = truncateModel(config.providers.planner.model, 28);
+  // Model info — show planner_models (coding/general) if configured, otherwise the base planner model
+  const pm = config.routing.planner_models;
+  const plannerPart = pm?.coding || pm?.general
+    ? [
+        pm.coding ? `${chalk.dim('Coding:')} ${chalk.white(truncateModel(pm.coding, 26))}` : '',
+        pm.general ? `${chalk.dim('General:')} ${chalk.white(truncateModel(pm.general, 26))}` : '',
+      ].filter(Boolean).join('  ')
+    : `${chalk.dim('Planner:')} ${chalk.white(truncateModel(config.providers.planner.model, 28))}`;
   const executorModel = truncateModel(config.providers.executor.model, 28);
   const fallbackPart = config.providers.fallback
     ? `  ${chalk.dim('Fallback:')} ${chalk.white(truncateModel(config.providers.fallback.model, 20))}`
     : '';
-  const modelsLine = ` ${chalk.dim('Planner:')} ${chalk.white(plannerModel)}  ${chalk.dim('Executor:')} ${chalk.white(executorModel)}${fallbackPart} `;
+  const modelsLine = ` ${plannerPart}  ${chalk.dim('Executor:')} ${chalk.white(executorModel)}${fallbackPart} `;
   lines.push(row(modelsLine, w));
 
   lines.push(separator(w));
