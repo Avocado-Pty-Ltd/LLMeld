@@ -6,6 +6,7 @@ export interface RouteDecision {
   path: 'direct' | 'planner-executor';
   provider: 'planner' | 'executor' | 'fallback';
   reason: string;
+  task_type?: string;
 }
 
 export function decideRoute(
