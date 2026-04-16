@@ -11,6 +11,7 @@ import { OllamaProvider } from './providers/ollama.js';
 import { StatsCollector } from './dashboard/stats.js';
 import { DashboardManager } from './dashboard/index.js';
 import { installCapture, uninstallCapture } from './dashboard/console-capture.js';
+import { MemoryCache } from './cache/memory-cache.js';
 
 async function main() {
   const useDashboard = process.stdout.isTTY === true && !process.argv.includes('--no-dashboard');
@@ -51,6 +52,9 @@ async function main() {
   const stats = new StatsCollector();
   const logger = new TraceLogger(config.logging, stats);
 
+  // Create memory cache for session-level working memory persistence
+  const memoryCache = new MemoryCache();
+
   // Shared dependencies
   const deps = {
     config,
@@ -59,6 +63,7 @@ async function main() {
     fallbackProvider,
     orchestrator,
     logger,
+    memoryCache,
   };
 
   // Create OpenAI surface

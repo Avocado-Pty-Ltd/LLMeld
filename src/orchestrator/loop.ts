@@ -2,14 +2,17 @@ import type { CloudProvider } from '../providers/base.js';
 import type { NormalisedLLMRequest, NormalisedLLMResponse } from '../types/normalised.js';
 import type { RoutingConfig } from '../types/config.js';
 import type { ExecutionPlan, StepResult, ProgressEvent } from '../types/plan.js';
+import type { WorkingMemory } from '../types/working-memory.js';
 import { Planner } from './planner.js';
 import { Executor } from './executor.js';
 import { verifyStep } from './verifier.js';
+import { updateMemoryFromStep, serializeMemory } from './memory.js';
 import { v4 as uuidv4 } from 'uuid';
 
 export interface OrchestrationTrace {
   trace_id: string;
   plan?: ExecutionPlan;
+  working_memory?: WorkingMemory;
   step_results: Array<{
     step_id: string;
     attempt: number;
@@ -41,6 +44,7 @@ export class OrchestrationLoop {
 
   async execute(
     req: NormalisedLLMRequest,
+    memory: WorkingMemory,
     onProgress?: (event: ProgressEvent) => void,
   ): Promise<{
     response: NormalisedLLMResponse;
@@ -51,16 +55,17 @@ export class OrchestrationLoop {
       trace_id: uuidv4(),
       step_results: [],
       total_tokens: 0,
+      working_memory: memory,
     };
 
     let plan: ExecutionPlan;
     try {
-      plan = await this.planner.createPlan(req, onProgress);
+      plan = await this.planner.createPlan(req, memory, onProgress);
       trace.plan = plan;
     } catch (err) {
       // If planner fails, retry once
       try {
-        plan = await this.planner.createPlan(req, onProgress);
+        plan = await this.planner.createPlan(req, memory, onProgress);
         trace.plan = plan;
       } catch (retryErr) {
         trace.error = `Planner failed: ${retryErr instanceof Error ? retryErr.message : retryErr}`;
@@ -84,6 +89,8 @@ export class OrchestrationLoop {
 
       const stepStart = Date.now();
       const executor = step.allow_local ? this.executor : (this.fallbackExecutor ?? this.executor);
+      // Enrich executor context with current working memory state
+      const enrichedContext = `${plan.context_for_executor}\n\n${serializeMemory(memory)}`;
 
       let result: StepResult | undefined;
       let passed = false;
@@ -97,7 +104,7 @@ export class OrchestrationLoop {
           emit({ stage: 'step_retry', stepId: step.id, attempt: attempts });
         }
         try {
-          result = await executor.execute(step, plan.context_for_executor, completedOutputs, onProgress);
+          result = await executor.execute(step, enrichedContext, completedOutputs, onProgress);
           const verification = verifyStep(step, result);
 
           if (verification.passed) {
@@ -117,7 +124,7 @@ export class OrchestrationLoop {
                 };
                 result = await this.fallbackExecutor.execute(
                   step,
-                  plan.context_for_executor,
+                  enrichedContext,
                   completedOutputs,
                   onProgress,
                   failCtx,
@@ -140,7 +147,7 @@ export class OrchestrationLoop {
             try {
               result = await this.fallbackExecutor.execute(
                 step,
-                plan.context_for_executor,
+                enrichedContext,
                 completedOutputs,
                 onProgress,
                 failCtx,
@@ -174,6 +181,9 @@ export class OrchestrationLoop {
         tool_log: result.tool_log,
         files_touched: result.files_touched,
       });
+
+      // Update working memory with step results for subsequent steps
+      updateMemoryFromStep(memory, step, result);
       trace.step_results.push({
         step_id: step.id,
         attempt: attempts,
@@ -196,6 +206,7 @@ export class OrchestrationLoop {
       req.messages,
       plan,
       stepSummaries,
+      memory,
     );
 
     const response: NormalisedLLMResponse = {
