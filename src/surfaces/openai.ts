@@ -368,6 +368,21 @@ export function registerOpenAISurface(app: FastifyInstance, deps: OpenAISurfaceD
         error: message,
       });
 
+      // If SSE headers were already sent (streaming planner-executor path),
+      // we cannot send a new HTTP response — close the stream gracefully instead.
+      if (reply.raw.headersSent) {
+        const errorChunk = `data: ${JSON.stringify({
+          id: `chatcmpl-error`,
+          object: 'chat.completion.chunk',
+          created: Math.floor(Date.now() / 1000),
+          model: config.gateway.model_alias,
+          choices: [{ index: 0, delta: { content: `\n\n[Error: ${message}]` }, finish_reason: null }],
+        })}\n\ndata: [DONE]\n\n`;
+        reply.raw.write(errorChunk);
+        reply.raw.end();
+        return reply;
+      }
+
       const status = message.includes('not reachable') ? 503 : 500;
       return reply.status(status).send({
         error: { message, type: 'server_error' },

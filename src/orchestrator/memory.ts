@@ -8,6 +8,9 @@ import type { MemoryCache } from '../cache/memory-cache.js';
 const MEMORY_EXTRACTION_PROMPT = `Extract structured working memory from the conversation below. Return valid JSON matching this exact schema:
 
 {
+  "repo_path": "absolute path to the TARGET project directory mentioned in conversation, or null",
+  "git_remote": "git remote URL of the target project if mentioned, or null",
+  "git_branch": "git branch of the target project if mentioned, or null",
   "current_goal": "what the user is currently trying to accomplish",
   "acceptance_criteria": ["measurable criteria for success"],
   "active_files": [{"path": "file/path", "purpose": "why it matters", "last_action": "read|modified|created"}],
@@ -27,7 +30,8 @@ Rules:
 - Only include information explicitly present in the conversation. Do not infer or guess.
 - Use null for unknown values.
 - Keep strings concise (under 100 chars each).
-- active_files should only include files explicitly mentioned.`;
+- active_files should only include files explicitly mentioned.
+- IMPORTANT: repo_path should be the project the user is working ON, not the server hosting this AI. If the user mentions a specific project directory or repository, use that path.`;
 
 /**
  * Build a WorkingMemory from the incoming request's message history.
@@ -81,6 +85,7 @@ Rules:
 - Preserve all existing information unless contradicted by new messages.
 - Add new files, decisions, and constraints discovered in the new messages.
 - Update the current_goal only if the user has changed direction.
+- Update repo_path/git_remote/git_branch if the user switches to a different project.
 - Update error_context if new errors appeared or previous ones were resolved.
 - Keep strings concise (under 100 chars each).
 - Return the complete updated memory object.`;
@@ -412,6 +417,9 @@ function parseMemoryResponse(content: string): Partial<WorkingMemory> {
     typeof parsed.project_stack === 'object';
 
   return {
+    repo_path: typeof parsed.repo_path === 'string' ? parsed.repo_path : undefined,
+    git_remote: typeof parsed.git_remote === 'string' ? parsed.git_remote : undefined,
+    git_branch: typeof parsed.git_branch === 'string' ? parsed.git_branch : undefined,
     current_goal: typeof parsed.current_goal === 'string' ? parsed.current_goal : undefined,
     acceptance_criteria: Array.isArray(parsed.acceptance_criteria)
       ? parsed.acceptance_criteria
@@ -454,10 +462,12 @@ function mergeWithEnvironment(
   extracted: Partial<WorkingMemory>,
   env: EnvironmentInfo,
 ): WorkingMemory {
+  // Prefer LLM-extracted repo info when the conversation references
+  // a different project than the server's working directory.
   return {
-    repo_path: env.repo_path,
-    git_remote: env.git_remote,
-    git_branch: env.git_branch,
+    repo_path: extracted.repo_path ?? env.repo_path,
+    git_remote: extracted.git_remote ?? env.git_remote,
+    git_branch: extracted.git_branch ?? env.git_branch,
     current_goal: extracted.current_goal ?? '',
     acceptance_criteria: extracted.acceptance_criteria ?? [],
     active_files: extracted.active_files ?? [],
