@@ -1,0 +1,1 @@
+{"EZYBIZ';\n  static const String CALLCONCIERGE = 'CALLCONCIERGE": 'static const Map<String', 'EZYBIZ': "BrandConfig(\n      appName: 'EzyBiz'", 'brandName': 'CALLCONCIERGE', 'themeColor': '0xFF2196F3', 'logoAssetPath': 'assets/images/callconcierge/logo.png', 'CALLCONCIERGE': "BrandConfig(\n      appName: 'CallConcierge'"}
