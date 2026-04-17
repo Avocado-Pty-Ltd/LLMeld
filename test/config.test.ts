@@ -15,7 +15,6 @@ describe('config schema', () => {
     expect(result.data.gateway.api_key).toBe('llmeld-local');
     expect(result.data.gateway.model_alias).toBe('llmeld/agent');
     expect(result.data.agent.max_iterations).toBe(15);
-    expect(result.data.agent.compact_threshold).toBe(8);
     expect(result.data.agent.parallel_tools).toBe(true);
     expect(result.data.logging.level).toBe('info');
   });
@@ -47,7 +46,6 @@ describe('config schema', () => {
       },
       agent: {
         max_iterations: 20,
-        compact_threshold: 12,
         parallel_tools: false,
       },
       logging: {
