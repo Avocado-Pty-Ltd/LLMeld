@@ -1,16 +1,13 @@
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { LoggingConfig } from '../types/config.js';
-import type { RouteDecision } from '../router/policy.js';
-import type { OrchestrationTrace } from '../orchestrator/loop.js';
-import type { StatsCollector } from '../dashboard/stats.js';
 
 export interface RequestTrace {
   trace_id: string;
   timestamp: string;
   surface: 'openai' | 'anthropic';
-  route_decision: RouteDecision;
-  orchestration?: OrchestrationTrace;
+  iterations: number;
+  tool_calls: Array<{ name: string; truncated: boolean }>;
   latency_ms: number;
   error?: string;
 }
@@ -20,14 +17,12 @@ export class TraceLogger {
   private level: string;
   private format: string;
   private emitCosts: boolean;
-  private stats?: StatsCollector;
 
-  constructor(config: LoggingConfig, stats?: StatsCollector) {
+  constructor(config: LoggingConfig) {
     this.traceFile = config.trace_file;
     this.level = config.level;
     this.format = config.format;
     this.emitCosts = config.emit_token_costs;
-    this.stats = stats;
 
     // Ensure log directory exists
     try {
@@ -38,16 +33,9 @@ export class TraceLogger {
   }
 
   logRequest(trace: RequestTrace): void {
-    const entry = {
-      ...trace,
-      ...(this.emitCosts && trace.orchestration
-        ? { estimated_cost: this.estimateCost(trace.orchestration.total_tokens) }
-        : {}),
-    };
-
     // Write to trace file
     try {
-      appendFileSync(this.traceFile, JSON.stringify(entry) + '\n');
+      appendFileSync(this.traceFile, JSON.stringify(trace) + '\n');
     } catch {
       // Log file write failure shouldn't crash the server
     }
@@ -56,11 +44,8 @@ export class TraceLogger {
     if (this.format === 'pretty') {
       this.prettyLog(trace);
     } else {
-      this.jsonLog(entry);
+      console.log(JSON.stringify(trace));
     }
-
-    // Feed dashboard stats
-    this.stats?.recordRequest(trace);
   }
 
   log(level: string, message: string, data?: Record<string, unknown>): void {
@@ -76,24 +61,13 @@ export class TraceLogger {
   }
 
   private prettyLog(trace: RequestTrace): void {
-    const route = trace.route_decision;
-    const steps = trace.orchestration?.step_results ?? [];
-    const stepsStr = steps.length > 0
-      ? ` [${steps.length} steps, ${steps.filter((s) => s.passed).length} passed]`
+    const toolsStr = trace.tool_calls.length > 0
+      ? ` [${trace.tool_calls.length} tool calls]`
       : '';
+    const errStr = trace.error ? ` ERROR: ${trace.error}` : '';
 
     console.log(
-      `[llmeld] ${trace.surface} | ${route.path} → ${route.provider} | ${trace.latency_ms}ms${stepsStr}`,
+      `[llmeld] ${trace.surface} | ${trace.iterations} iterations | ${trace.latency_ms}ms${toolsStr}${errStr}`,
     );
-  }
-
-  private jsonLog(entry: Record<string, unknown>): void {
-    console.log(JSON.stringify(entry));
-  }
-
-  private estimateCost(totalTokens: number): string {
-    // Rough estimate: ~$0.003 per 1K tokens (blended average)
-    const cost = (totalTokens / 1000) * 0.003;
-    return `~$${cost.toFixed(4)}`;
   }
 }
