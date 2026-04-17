@@ -168,7 +168,7 @@ export function registerOpenAISurface(app: FastifyInstance, deps: OpenAISurfaceD
 
         const stream = runAgenticLoopStreaming(provider, req, agentOpts);
         let result;
-        let accumulatedContent = '';
+        const contentChunks: string[] = [];
 
         try {
           while (true) {
@@ -182,7 +182,7 @@ export function registerOpenAISurface(app: FastifyInstance, deps: OpenAISurfaceD
             switch (event.type) {
               case 'content_delta':
                 if (event.content) {
-                  accumulatedContent += event.content;
+                  contentChunks.push(event.content);
                   writeSSEChunk(raw, sseId, modelAlias, event.content);
                 }
                 break;
@@ -207,6 +207,7 @@ export function registerOpenAISurface(app: FastifyInstance, deps: OpenAISurfaceD
         raw.end();
 
         // Extract and cache memory from accumulated content
+        const accumulatedContent = contentChunks.join('');
         if (accumulatedContent) {
           const { memory } = stripMemoryBlock(accumulatedContent);
           if (memory) {

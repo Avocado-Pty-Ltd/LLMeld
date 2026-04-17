@@ -145,8 +145,7 @@ export function registerAnthropicSurface(app: FastifyInstance, deps: AnthropicSu
 
         const stream = runAgenticLoopStreaming(provider, req, agentOpts);
         let result;
-        let hasContent = false;
-        let accumulatedContent = '';
+        const contentChunks: string[] = [];
         let lastFinishReason: NormalisedLLMResponse['finish_reason'] = 'stop';
         let lastUsage: NormalisedStreamEvent['usage'];
 
@@ -162,8 +161,7 @@ export function registerAnthropicSurface(app: FastifyInstance, deps: AnthropicSu
             switch (event.type) {
               case 'content_delta':
                 if (event.content) {
-                  hasContent = true;
-                  accumulatedContent += event.content;
+                  contentChunks.push(event.content);
                   writeAnthropicSSE(raw, 'content_block_delta', {
                     type: 'content_block_delta',
                     index: blockIndex,
@@ -253,6 +251,7 @@ export function registerAnthropicSurface(app: FastifyInstance, deps: AnthropicSu
         raw.end();
 
         // Extract and cache memory from accumulated content
+        const accumulatedContent = contentChunks.join('');
         if (accumulatedContent) {
           const { memory } = stripMemoryBlock(accumulatedContent);
           if (memory) {

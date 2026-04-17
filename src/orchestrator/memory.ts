@@ -27,7 +27,25 @@ Rules:
 // Strip <memory> block from model response content
 // ---------------------------------------------------------------------------
 
-const MEMORY_REGEX = /<memory>\s*([\s\S]*?)\s*<\/memory>/;
+// Anchored to end of string — the memory block should always be the last thing
+const MEMORY_REGEX = /<memory>\s*([\s\S]*?)\s*<\/memory>\s*$/;
+// Unanchored variant for stripping from history (memory may not be at end after edits)
+const MEMORY_REGEX_GLOBAL = /<memory>\s*[\s\S]*?\s*<\/memory>/g;
+
+// Max items/lengths to prevent prompt bloat from malformed memory
+const MAX_STRING_LEN = 200;
+const MAX_ARRAY_ITEMS = 10;
+
+function clampString(val: unknown, maxLen = MAX_STRING_LEN): string {
+  if (typeof val !== 'string') return '';
+  return val.slice(0, maxLen);
+}
+
+function nullableString(val: unknown, maxLen = MAX_STRING_LEN): string | null {
+  if (val === null || val === undefined) return null;
+  if (typeof val !== 'string') return null;
+  return val.slice(0, maxLen);
+}
 
 /**
  * Extract and remove the <memory> block from model response content.
@@ -40,39 +58,74 @@ export function stripMemoryBlock(content: string): { content: string; memory: Wo
   }
 
   const cleaned = content.replace(MEMORY_REGEX, '').trimEnd();
-  const env = getEnvironmentInfo();
+  const env = getCachedEnvironmentInfo();
 
   try {
     const parsed = JSON.parse(match[1]);
     const memory: WorkingMemory = {
-      repo_path: typeof parsed.repo_path === 'string' ? parsed.repo_path : env.repo_path,
-      git_remote: typeof parsed.git_remote === 'string' ? parsed.git_remote : env.git_remote,
-      git_branch: typeof parsed.git_branch === 'string' ? parsed.git_branch : env.git_branch,
-      current_goal: typeof parsed.current_goal === 'string' ? parsed.current_goal : '',
-      acceptance_criteria: Array.isArray(parsed.acceptance_criteria) ? parsed.acceptance_criteria : [],
-      active_files: Array.isArray(parsed.active_files) ? parsed.active_files : [],
-      key_decisions: Array.isArray(parsed.key_decisions) ? parsed.key_decisions : [],
-      discovered_constraints: Array.isArray(parsed.discovered_constraints) ? parsed.discovered_constraints : [],
+      repo_path: nullableString(parsed.repo_path) ?? env.repo_path,
+      git_remote: nullableString(parsed.git_remote) ?? env.git_remote,
+      git_branch: nullableString(parsed.git_branch) ?? env.git_branch,
+      current_goal: clampString(parsed.current_goal),
+      acceptance_criteria: validateStringArray(parsed.acceptance_criteria),
+      active_files: validateActiveFiles(parsed.active_files),
+      key_decisions: validateKeyDecisions(parsed.key_decisions),
+      discovered_constraints: validateStringArray(parsed.discovered_constraints),
       error_context:
         parsed.error_context && typeof parsed.error_context === 'object'
           ? {
-              description: String(parsed.error_context.description ?? ''),
-              attempted_fix: parsed.error_context.attempted_fix ? String(parsed.error_context.attempted_fix) : undefined,
+              description: clampString(parsed.error_context.description),
+              attempted_fix: parsed.error_context.attempted_fix
+                ? clampString(parsed.error_context.attempted_fix)
+                : undefined,
               resolved: Boolean(parsed.error_context.resolved),
             }
           : null,
       project_stack: {
-        language: parsed.project_stack?.language ?? null,
-        framework: parsed.project_stack?.framework ?? null,
-        test_runner: parsed.project_stack?.test_runner ?? null,
-        package_manager: parsed.project_stack?.package_manager ?? null,
-        linting: parsed.project_stack?.linting ?? null,
+        language: nullableString(parsed.project_stack?.language),
+        framework: nullableString(parsed.project_stack?.framework),
+        test_runner: nullableString(parsed.project_stack?.test_runner),
+        package_manager: nullableString(parsed.project_stack?.package_manager),
+        linting: nullableString(parsed.project_stack?.linting),
       },
     };
     return { content: cleaned, memory };
   } catch {
     return { content: cleaned, memory: null };
   }
+}
+
+function validateStringArray(arr: unknown): string[] {
+  if (!Array.isArray(arr)) return [];
+  return arr
+    .filter((item): item is string => typeof item === 'string')
+    .slice(0, MAX_ARRAY_ITEMS)
+    .map(s => s.slice(0, MAX_STRING_LEN));
+}
+
+function validateActiveFiles(arr: unknown): WorkingMemory['active_files'] {
+  if (!Array.isArray(arr)) return [];
+  return arr
+    .filter((item): item is Record<string, unknown> => item && typeof item === 'object')
+    .slice(0, MAX_ARRAY_ITEMS)
+    .map(item => ({
+      path: clampString(item.path),
+      purpose: clampString(item.purpose),
+      last_action: (['read', 'modified', 'created'].includes(item.last_action as string)
+        ? item.last_action
+        : 'read') as 'read' | 'modified' | 'created',
+    }));
+}
+
+function validateKeyDecisions(arr: unknown): WorkingMemory['key_decisions'] {
+  if (!Array.isArray(arr)) return [];
+  return arr
+    .filter((item): item is Record<string, unknown> => item && typeof item === 'object')
+    .slice(0, MAX_ARRAY_ITEMS)
+    .map(item => ({
+      decision: clampString(item.decision),
+      rationale: typeof item.rationale === 'string' ? item.rationale.slice(0, MAX_STRING_LEN) : undefined,
+    }));
 }
 
 // ---------------------------------------------------------------------------
@@ -85,8 +138,10 @@ export function stripMemoryBlock(content: string): { content: string; memory: Wo
  */
 export function stripMemoryFromHistory(messages: NormalisedMessage[]): NormalisedMessage[] {
   return messages.map((msg) => {
-    if (msg.role === 'assistant' && msg.content && MEMORY_REGEX.test(msg.content)) {
-      return { ...msg, content: msg.content.replace(MEMORY_REGEX, '').trimEnd() };
+    if (msg.role === 'assistant' && msg.content && MEMORY_REGEX_GLOBAL.test(msg.content)) {
+      // Reset lastIndex since we're using a global regex
+      MEMORY_REGEX_GLOBAL.lastIndex = 0;
+      return { ...msg, content: msg.content.replace(MEMORY_REGEX_GLOBAL, '').trimEnd() };
     }
     return msg;
   });
@@ -123,7 +178,7 @@ export function saveSessionMemory(
 }
 
 // ---------------------------------------------------------------------------
-// Serialize working memory into compact text for prompt injection (unchanged)
+// Serialize working memory into compact text for prompt injection
 // ---------------------------------------------------------------------------
 
 export function serializeMemory(memory: WorkingMemory): string {
@@ -188,7 +243,7 @@ export function serializeMemory(memory: WorkingMemory): string {
 }
 
 // ---------------------------------------------------------------------------
-// Compact messages using working memory (unchanged)
+// Compact messages using working memory
 // ---------------------------------------------------------------------------
 
 export function compactMessages(
@@ -226,13 +281,21 @@ export function compactMessages(
 }
 
 // ---------------------------------------------------------------------------
-// Deterministic environment extraction (unchanged)
+// Deterministic environment extraction — cached at module level
 // ---------------------------------------------------------------------------
 
 interface EnvironmentInfo {
   repo_path: string | null;
   git_remote: string | null;
   git_branch: string | null;
+}
+
+let _cachedEnv: EnvironmentInfo | null = null;
+
+function getCachedEnvironmentInfo(): EnvironmentInfo {
+  if (_cachedEnv) return _cachedEnv;
+  _cachedEnv = getEnvironmentInfo();
+  return _cachedEnv;
 }
 
 function getEnvironmentInfo(): EnvironmentInfo {
@@ -252,4 +315,9 @@ function getEnvironmentInfo(): EnvironmentInfo {
     git_remote: gitRemote || null,
     git_branch: gitBranch || null,
   };
+}
+
+/** Reset cached env info (for testing). */
+export function _resetEnvCache(): void {
+  _cachedEnv = null;
 }
