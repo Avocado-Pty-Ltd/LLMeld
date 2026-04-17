@@ -1,1 +1,225 @@
-['Ollama](https://ollama.com/) (for local model execution)\n\n### From Source\n\n```bash\ngit clone https://github.com/Avocado-Pty-Ltd/LLMeld.git\ncd LLMeld\npnpm install\n# or if using npm:\nnpm install\n```\n\n### Using Docker\n\n```bash\n# Create config from example\ncp config.example.yaml config.yaml\n\n# Create .env file with your API keys\ncat > .env << \'EOF\'\nOPENROUTER_API_KEY="your-key-here"\n# or\nANTHROPIC_API_KEY="your-key-here', 'EOF\n\n# Start the service\ndocker compose up -d\n```\n\n> **Note:** If using the legacy Docker Compose standalone binary, use `docker-compose up -d` instead.\n\n## Configuration\n\nCopy the example configuration and customise it for your needs:\n\n```bash\ncp config.example.yaml config.yaml\n```\n\nEdit `config.yaml` to configure your providers, routing mode, and logging preferences. See `config.example.yaml` for detailed comments on every option.\n\nKey configuration areas:\n\n- **Gateway**: \n  - `host`: Bind address (default: 127.0.0.1)\n  - `port`: Listening port (default: 8000)\n  - `log_level`: Verbosity (`debug`, `info`, `warn`, `error`)\n\n- **Providers**: \n  - `cloud`: Primary reasoning provider (OpenRouter, Anthropic, etc.)\n  - `local`: Local execution provider (typically Ollama)\n  - `fallback`: Backup cloud provider for failed local executions\n\n- **Routing**: \n  - `mode`: `fast`, `balanced`, `best`, `cloud`, or `local`\n  - `force_local_regex`: Patterns that always run locally (e.g., "password', 'ssn', 'always_escalate_regex`: Patterns that always run in cloud (e.g., "investment strategy")\n\n- **Logging**: \n  - `trace_log_path`: Path to detailed JSON trace log\n  - `emit_token_costs`: Whether to log estimated costs\n  - `dashboard_log_path`: Dashboard event log\n\n## Usage\n\nStart the gateway:\n\n```bash\npnpm start\n# or if using npm:\nnpm run start\n```\n\nThen point your tools to:\n\n- OpenAI-compatible: `http://localhost:8000/v1`\n- Anthropic-compatible: `http://localhost:8000/v1/anthropic`\n\n### API Key Management\n\nStore keys in environment variables:\n\n```bash\nexport OPENROUTER_API_KEY="your-key-here"\nexport ANTHROPIC_API_KEY="your-key-here"\n```\n\nOr use a `.env` file in project root:\n\n```bash\necho \'OPENROUTER_API_KEY="your-key-here', ' > .env\n```\n\n### Docker Usage\n\n```bash\n# Build image\ndocker build -t llmeld .\n\n# Run with config mounted\ndocker run -p 8000:8000 \n  -v $(pwd)/config.yaml:/app/config.yaml \n  -v $(pwd)/.env:/app/.env \n  llmeld\n```\n\n### TUI Dashboard\n\nRun with live dashboard:\n\n```bash\npnpm dashboard\n# or if using npm:\nnpm run dashboard\n```\n\n### Interactive Setup\n\nFor first-time configuration:\n\n```bash\npnpm setup\n# or if using npm:\nnpm run setup\n```\n\n### Brand Building\n\nThis repository supports building for two brands: EzyBiz and CallConcierge.\n\n#### Android\n\nTo build the EzyBiz flavor:\n```bash\n./gradlew assembleEzyBizDebug\n```\n\nTo build the CallConcierge flavor:\n```bash\n./gradlew assembleCallConciergeDebug\n```\n\n#### iOS\n\nTo build the EzyBiz scheme:\n```bash\nxcodebuild -workspace YourApp.xcworkspace -scheme EzyBiz -configuration Debug -destination', "platform=iOS Simulator,name=iPhone 15' build\n```\n\nTo build the CallConcierge scheme:\n```bash\nxcodebuild -workspace YourApp.xcworkspace -scheme CallConcierge -configuration Debug -destination 'platform=iOS Simulator,name=iPhone 15' build\n```\n\n#### Brand Switching Mechanism\n\nThe application uses a React Native theme provider to switch between brands. The current brand is determined by the configuration files and build flavors/schemes. The theme provider loads brand-specific configurations from the `brandConfig.js` file, which contains separate configurations for EzyBiz and CallConcierge. The `BrandContext.js` manages the brand state and provides it to components throughout the application.\n\n## Logging\n\nStructured JSON logs are written to `logs/traces.jsonl` by default. Each log entry contains:\n\n- `timestamp`: ISO 8601 timestamp\n- `request_id`: Unique ID for tracking request flow\n- `endpoint`: API endpoint called\n- `model`: Model used for processing\n- `tokens_in`/`tokens_out`: Token counts (if `emit_token_costs: true`)\n- `estimated_cost`: Estimated token costs for each request when `emit_token_costs: true`. View cost breakdowns:\n\n```bash\ncat logs/traces.jsonl | jq 'select(.estimated_cost) | {timestamp, estimated_cost}'\n```\n\n## Troubleshooting\n\n### Ollama Connection Issues\n\nEnsure Ollama is running and accessible:\n\n```bash\ncurl http://localhost:11434/api/tags\n```\n\n### API Key Errors\n\nCheck that environment variables are set:\n\n```bash\necho $OPENROUTER_API_KEY\necho $ANTHROPIC_API_KEY\n```\n\n### Docker Container Won't Start\n\nCheck the logs:\n\n```bash\ndocker logs -f llmeld\n```\n\nEnsure `config.yaml` and `.env` exist in the project root before running `docker compose up`.\n\n## Contributing\n\nWe welcome contributions! Please:\n\n1. Fork the repository\n2. Create a feature branch (`git checkout -b feature/amazing-feature`)\n3. Commit your changes (`git commit -m 'Add amazing feature'`)\n4. Push to the branch (`git push origin feature/amazing-feature`)\n5. Open a Pull Request\n\n## License\n\nMIT License — see LICENSE file for details.\n\n## Support\n\nFor issues, questions, or suggestions, please open an issue on GitHub or contact the maintainers."]
+# LLMeld
+
+LLMeld is a gateway that allows you to use local LLMs for local tasks and cloud services for complex tasks, with a focus on local development and deployment.
+
+### From Source
+
+```bash
+git clone https://github.com/Avocado-Pty-Ltd/LLMeld.git
+cd LLMeld
+pnpm install
+# or if using npm:
+npm install
+```
+
+### Using Docker
+
+```bash
+# Create config from example
+cp config.example.yaml config.yaml
+
+# Create .env file with your API keys
+cat > .env << 'EOF'
+OPENROUTER_API_KEY="your-key-here"
+# or
+ANTHROPIC_API_KEY="your-key-here"
+EOF
+
+# Start the service
+docker compose up -d
+```
+
+> **Note:** If using the legacy Docker Compose standalone binary, use `docker-compose up -d` instead.
+
+## Configuration
+
+Copy the example configuration and customise it for your needs:
+
+```bash
+cp config.example.yaml config.yaml
+```
+
+Edit `config.yaml` to configure your providers, routing mode, and logging preferences. See `config.example.yaml` for detailed comments on every option.
+
+Key configuration areas:
+
+- **Gateway**: 
+  - `host`: Bind address (default: 127.0.0.1)
+  - `port`: Listening port (default: 8000)
+  - `log_level`: Verbosity (`debug`, `info`, `warn`, `error`)
+
+- **Providers**: 
+  - `cloud`: Primary reasoning provider (OpenRouter, Anthropic, etc.)
+  - `local`: Local execution provider (typically Ollama)
+  - `fallback`: Backup cloud provider for failed local executions
+
+- **Routing**: 
+  - `mode`: `fast`, `balanced`, `best`, `cloud`, or `local`
+  - `force_local_regex`: Patterns that always run locally (e.g., "password", "ssn")
+  - `always_escalate_regex`: Patterns that always run in cloud (e.g., "investment strategy")
+
+- **Logging**: 
+  - `trace_log_path`: Path to detailed JSON trace log
+  - `emit_token_costs`: Whether to log estimated costs
+  - `dashboard_log_path`: Dashboard event log
+
+## Usage
+
+Start the gateway:
+
+```bash
+pnpm start
+# or if using npm:
+npm run start
+```
+
+Then point your tools to:
+
+- OpenAI-compatible: `http://localhost:8000/v1`
+- Anthropic-compatible: `http://localhost:8000/v1/anthropic`
+
+### API Key Management
+
+Store keys in environment variables:
+
+```bash
+export OPENROUTER_API_KEY="your-key-here"
+export ANTHROPIC_API_KEY="your-key-here"
+```
+
+Or use a `.env` file in project root:
+
+```bash
+echo 'OPENROUTER_API_KEY="your-key-here"' > .env
+```
+
+### Docker Usage
+
+```bash
+# Build image
+docker build -t llmeld .
+
+# Run with config mounted
+docker run -p 8000:8000 \
+  -v $(pwd)/config.yaml:/app/config.yaml \
+  -v $(pwd)/.env:/app/.env \
+  llmeld
+```
+
+### TUI Dashboard
+
+Run with live dashboard:
+
+```bash
+pnpm dashboard
+# or if using npm:
+npm run dashboard
+```
+
+### Interactive Setup
+
+For first-time configuration:
+
+```bash
+pnpm setup
+# or if using npm:
+npm run setup
+```
+
+### Brand Building
+
+This repository supports building for two brands: EzyBiz and CallConcierge.
+Build instructions are provided below.
+
+#### Android
+
+To build either brand, run:
+```bash
+./gradlew assembleEzyBizRelease
+# or for CallConcierge:
+./gradlew assembleCallConciergeRelease
+```
+
+For debugging, you can use:
+```bash
+./gradlew assembleEzyBizDebug
+# or for CallConcierge:
+./gradlew assembleCallConciergeDebug
+```
+
+#### iOS
+
+To build for iOS, you must set the `BRAND` environment variable to either `ezybiz` or `callconcierge` when building the app.
+
+Set your brand and build using:
+```bash
+export BRAND=ezybiz
+# or for CallConcierge:
+export BRAND=callconcierge
+```
+
+Then build with:
+```bash
+npx react-native run-ios
+```
+
+To use a specific scheme:
+```bash
+xcodebuild -scheme EzyBiz -configuration Release
+# or for CallConcierge:
+xcodebuild -scheme CallConcierge -configuration Release
+```
+
+## Cost Tracking
+
+View cost breakdowns:
+```bash
+cat logs/traces.jsonl | jq 'select(.estimated_cost) | {timestamp, estimated_cost}'
+```
+
+## Troubleshooting
+
+### Ollama Connection Issues
+
+Ensure Ollama is running and accessible:
+
+```bash
+curl http://localhost:11434/api/tags
+```
+
+### API Key Errors
+
+Check that environment variables are set:
+
+```bash
+echo $OPENROUTER_API_KEY
+echo $ANTHROPIC_API_KEY
+```
+
+### Docker Container Won't Start
+
+Check the logs:
+
+```bash
+docker logs -f llmeld
+```
+
+Ensure `config.yaml` and `.env` exist in the project root before running `docker compose up`.
+
+## Contributing
+
+We welcome contributions! Please:
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+## License
+
+MIT License — see LICENSE file for details.
+
+## Support
+
+For issues, questions, or suggestions, please open an issue on GitHub or contact the maintainers.
