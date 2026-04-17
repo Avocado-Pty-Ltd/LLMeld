@@ -20,26 +20,15 @@ const providerConfigSchema = z.object({
 });
 
 const gatewaySchema = z.object({
-  openai_port: z.number().int().positive().default(8000),
-  anthropic_port: z.number().int().positive().default(8001),
+  port: z.number().int().positive().default(8000),
   api_key: z.string().default('llmeld-local'),
-  model_alias: z.string().default('llmeld/planner-executor'),
+  model_alias: z.string().default('llmeld/agent'),
   debug_traces: z.boolean().default(false),
 });
 
-const routingSchema = z.object({
-  default_mode: z.enum(['fast', 'balanced', 'best', 'cloud', 'local']).default('balanced'),
-  simple_threshold: z.number().positive().default(500),
-  complex_threshold: z.number().positive().default(1500),
-  max_retries: z.number().int().min(0).default(2),
-  enable_task_classifier: z.boolean().default(true),
-  privacy_mode: z.boolean().default(false),
-  complex_keywords: z.array(z.string()).default([
-    'create', 'build', 'implement', 'architect', 'refactor', 'design',
-  ]),
-  simple_keywords: z.array(z.string()).default([
-    'what is', 'define', 'explain briefly',
-  ]),
+const agentSchema = z.object({
+  max_iterations: z.number().int().positive().default(15),
+  parallel_tools: z.boolean().default(true),
 });
 
 const loggingSchema = z.object({
@@ -51,12 +40,8 @@ const loggingSchema = z.object({
 
 export const configSchema = z.object({
   gateway: gatewaySchema.optional().transform((v) => gatewaySchema.parse(v ?? {})),
-  providers: z.object({
-    planner: providerConfigSchema,
-    executor: providerConfigSchema,
-    fallback: providerConfigSchema.optional(),
-  }),
-  routing: routingSchema.optional().transform((v) => routingSchema.parse(v ?? {})),
+  provider: providerConfigSchema,
+  agent: agentSchema.optional().transform((v) => agentSchema.parse(v ?? {})),
   logging: loggingSchema.optional().transform((v) => loggingSchema.parse(v ?? {})),
 });
 

@@ -1,6 +1,5 @@
 export interface GatewayConfig {
-  openai_port: number;
-  anthropic_port: number;
+  port: number;
   api_key: string;
   model_alias: string;
   debug_traces: boolean;
@@ -25,19 +24,9 @@ export interface ProviderConfig {
   attribution?: ProviderAttribution;
 }
 
-export interface RoutingConfig {
-  default_mode: 'fast' | 'balanced' | 'best' | 'cloud' | 'local';
-  simple_threshold: number;
-  complex_threshold: number;
-  max_retries: number;
-  enable_task_classifier: boolean;
-  privacy_mode: boolean;
-  complex_keywords: string[];
-  simple_keywords: string[];
-  planner_models?: {
-    coding?: string;
-    general?: string;
-  };
+export interface AgentConfig {
+  max_iterations: number;
+  parallel_tools: boolean;
 }
 
 export interface LoggingConfig {
@@ -49,11 +38,7 @@ export interface LoggingConfig {
 
 export interface LLMeldConfig {
   gateway: GatewayConfig;
-  providers: {
-    planner: ProviderConfig;
-    executor: ProviderConfig;
-    fallback?: ProviderConfig;
-  };
-  routing: RoutingConfig;
+  provider: ProviderConfig;
+  agent: AgentConfig;
   logging: LoggingConfig;
 }

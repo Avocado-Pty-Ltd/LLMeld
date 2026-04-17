@@ -2,25 +2,25 @@ import type { FastifyInstance } from 'fastify';
 import type { ServerResponse } from 'http';
 import type { LLMeldConfig } from '../types/config.js';
 import type { CloudProvider } from '../providers/base.js';
-import type { OrchestrationLoop } from '../orchestrator/loop.js';
 import type { TraceLogger } from '../logger/trace.js';
-import type { NormalisedLLMResponse } from '../types/normalised.js';
-import type { ProgressEvent } from '../types/plan.js';
+import type { NormalisedLLMResponse, NormalisedStreamEvent } from '../types/normalised.js';
 import type { MemoryCache } from '../cache/memory-cache.js';
-import { TOOL_DEFINITIONS } from '../orchestrator/tools.js';
-import { runAgenticDirect } from '../orchestrator/agent.js';
-import { getOrBuildMemory, compactMessages } from '../orchestrator/memory.js';
+import { runAgenticLoop, runAgenticLoopStreaming } from '../orchestrator/agent.js';
+import {
+  MEMORY_SYSTEM_INSTRUCTION,
+  getSessionMemory,
+  saveSessionMemory,
+  compactMessages,
+  stripMemoryBlock,
+  stripMemoryFromHistory,
+} from '../orchestrator/memory.js';
 import { fromAnthropic } from '../normaliser/from-anthropic.js';
 import { toAnthropicMessages } from '../normaliser/to-anthropic.js';
-import { decideRoute } from '../router/policy.js';
 import { v4 as uuidv4 } from 'uuid';
 
 export interface AnthropicSurfaceDeps {
   config: LLMeldConfig;
-  plannerProvider: CloudProvider;
-  executorProvider: CloudProvider;
-  fallbackProvider?: CloudProvider;
-  orchestrator: OrchestrationLoop;
+  provider: CloudProvider;
   logger: TraceLogger;
   memoryCache: MemoryCache;
 }
@@ -44,159 +44,21 @@ function mapFinishReason(
   }
 }
 
-/** Stream a complete NormalisedLLMResponse as Anthropic SSE events. */
-function streamAnthropicResponse(
-  raw: ServerResponse,
-  response: NormalisedLLMResponse,
-  modelAlias: string,
-): void {
-  const msgId = response.id || `msg_${uuidv4()}`;
-  const stopReason = mapFinishReason(response.finish_reason);
-
-  // 1. message_start
-  writeAnthropicSSE(raw, 'message_start', {
-    type: 'message_start',
-    message: {
-      id: msgId,
-      type: 'message',
-      role: 'assistant',
-      model: modelAlias,
-      content: [],
-      stop_reason: null,
-      stop_sequence: null,
-      usage: {
-        input_tokens: response.usage?.prompt_tokens ?? 0,
-        output_tokens: 1,
-      },
-    },
-  });
-
-  let blockIndex = 0;
-
-  // 2. Text content block
-  if (response.content) {
-    writeAnthropicSSE(raw, 'content_block_start', {
-      type: 'content_block_start',
-      index: blockIndex,
-      content_block: { type: 'text', text: '' },
-    });
-
-    // Chunk text into ~80 char pieces for perceived streaming
-    const text = response.content;
-    const chunkSize = 80;
-    for (let i = 0; i < text.length; i += chunkSize) {
-      writeAnthropicSSE(raw, 'content_block_delta', {
-        type: 'content_block_delta',
-        index: blockIndex,
-        delta: { type: 'text_delta', text: text.slice(i, i + chunkSize) },
-      });
-    }
-
-    writeAnthropicSSE(raw, 'content_block_stop', {
-      type: 'content_block_stop',
-      index: blockIndex,
-    });
-    blockIndex++;
-  }
-
-  // 3. Tool use content blocks
-  if (response.tool_calls) {
-    for (const tc of response.tool_calls) {
-      const toolId = tc.id.replace('call_', 'toolu_');
-      let input: Record<string, unknown> = {};
-      try {
-        input = JSON.parse(tc.function.arguments || '{}');
-      } catch { /* empty */ }
-
-      writeAnthropicSSE(raw, 'content_block_start', {
-        type: 'content_block_start',
-        index: blockIndex,
-        content_block: { type: 'tool_use', id: toolId, name: tc.function.name, input: {} },
-      });
-
-      // Stream the JSON input as partial chunks
-      const jsonStr = JSON.stringify(input);
-      const chunkSize = 100;
-      for (let i = 0; i < jsonStr.length; i += chunkSize) {
-        writeAnthropicSSE(raw, 'content_block_delta', {
-          type: 'content_block_delta',
-          index: blockIndex,
-          delta: { type: 'input_json_delta', partial_json: jsonStr.slice(i, i + chunkSize) },
-        });
-      }
-
-      writeAnthropicSSE(raw, 'content_block_stop', {
-        type: 'content_block_stop',
-        index: blockIndex,
-      });
-      blockIndex++;
-    }
-  }
-
-  // If no content at all, send an empty text block
-  if (blockIndex === 0) {
-    writeAnthropicSSE(raw, 'content_block_start', {
-      type: 'content_block_start',
-      index: 0,
-      content_block: { type: 'text', text: '' },
-    });
-    writeAnthropicSSE(raw, 'content_block_stop', {
-      type: 'content_block_stop',
-      index: 0,
-    });
-    blockIndex = 1;
-  }
-
-  // 4. message_delta
-  writeAnthropicSSE(raw, 'message_delta', {
-    type: 'message_delta',
-    delta: { stop_reason: stopReason, stop_sequence: null },
-    usage: { output_tokens: response.usage?.completion_tokens ?? 0 },
-  });
-
-  // 5. message_stop
-  writeAnthropicSSE(raw, 'message_stop', { type: 'message_stop' });
-}
-
-/** Convert a progress event into a human-readable line. */
-function formatProgressLine(event: ProgressEvent): string {
-  switch (event.stage) {
-    case 'planning':
-      return `${event.message}\n`;
-    case 'plan_ready':
-      return `Plan ready: ${event.plan.steps.length} step${event.plan.steps.length === 1 ? '' : 's'}\n\n`;
-    case 'step_start':
-      return `Step ${event.stepIndex + 1}/${event.totalSteps}: ${event.step.title}\n`;
-    case 'step_complete':
-      return event.passed
-        ? `Complete (${event.tokens} tokens, ${(event.elapsed_ms / 1000).toFixed(1)}s)\n\n`
-        : `Failed verification\n`;
-    case 'step_retry':
-      return `Retrying (attempt ${event.attempt})...\n`;
-    case 'step_escalated':
-      return `Escalated to cloud fallback\n`;
-    case 'tool_call':
-      return `Tool: ${event.tool}(${event.args})\n`;
-    case 'tool_result':
-      return event.truncated ? `Got result (truncated)\n` : '';
-    case 'synthesizing':
-      return `${event.message}\n\n`;
-    case 'done':
-      return '';
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Surface registration
 // ---------------------------------------------------------------------------
 
 export function registerAnthropicSurface(app: FastifyInstance, deps: AnthropicSurfaceDeps) {
-  const { config, plannerProvider, executorProvider, orchestrator, logger, memoryCache } = deps;
+  const { config, provider, logger, memoryCache } = deps;
+  const agentOpts = {
+    maxIterations: config.agent.max_iterations,
+    parallelTools: config.agent.parallel_tools,
+  };
 
-  // Log incoming requests only when debug traces are enabled
+  // Debug logging
   if (config.gateway.debug_traces) {
     app.addHook('onRequest', async (request) => {
-      logger.log('debug', `anthropic ← ${request.method} ${request.url}`);
+      logger.log('debug', `anthropic <- ${request.method} ${request.url}`);
     });
   }
 
@@ -224,28 +86,41 @@ export function registerAnthropicSurface(app: FastifyInstance, deps: AnthropicSu
       const body = request.body as unknown;
       const isStreaming = (body as Record<string, unknown>).stream === true;
       const normalised = fromAnthropic(body as Parameters<typeof fromAnthropic>[0]);
-
-      // Always request non-streaming from providers
       normalised.stream = false;
 
-      // Build working memory from conversation history (with session-level caching)
-      const { memory, sessionKey, messageCount } = await getOrBuildMemory(normalised, executorProvider, memoryCache);
+      // Strip <memory> blocks from assistant messages in history
+      normalised.messages = stripMemoryFromHistory(normalised.messages);
 
-      const routeDecision = decideRoute(normalised, config.routing);
+      // Inline memory: check cache for existing memory
+      const cached = getSessionMemory(memoryCache, normalised.messages);
+      const req = cached ? compactMessages(normalised, cached.memory) : normalised;
+
+      // Append memory system instruction to system prompt
+      const systemIdx = req.messages.findIndex(m => m.role === 'system');
+      if (systemIdx >= 0) {
+        req.messages[systemIdx] = {
+          ...req.messages[systemIdx],
+          content: req.messages[systemIdx].content + MEMORY_SYSTEM_INSTRUCTION,
+        };
+      } else {
+        req.messages.unshift({ role: 'system', content: MEMORY_SYSTEM_INSTRUCTION.trimStart() });
+      }
+
+      req.tools = req.tools ?? [];
+
       const modelAlias = config.gateway.model_alias;
 
-      // --- Streaming planner-executor path ---
-      if (isStreaming && routeDecision.path === 'planner-executor') {
+      if (isStreaming) {
         const raw = reply.raw;
+        const msgId = `msg_${uuidv4()}`;
+
         raw.writeHead(200, {
           'Content-Type': 'text/event-stream',
           'Cache-Control': 'no-cache',
           'Connection': 'keep-alive',
         });
 
-        const msgId = `msg_${uuidv4()}`;
-
-        // Start message
+        // message_start
         writeAnthropicSSE(raw, 'message_start', {
           type: 'message_start',
           message: {
@@ -260,143 +135,163 @@ export function registerAnthropicSurface(app: FastifyInstance, deps: AnthropicSu
           },
         });
 
-        // Open a text block for progress
+        // Open a text block
+        let blockIndex = 0;
         writeAnthropicSSE(raw, 'content_block_start', {
           type: 'content_block_start',
-          index: 0,
+          index: blockIndex,
           content_block: { type: 'text', text: '' },
         });
 
-        const onProgress = (event: ProgressEvent) => {
-          const line = formatProgressLine(event);
-          if (line) {
-            writeAnthropicSSE(raw, 'content_block_delta', {
-              type: 'content_block_delta',
-              index: 0,
-              delta: { type: 'text_delta', text: line },
-            });
-          }
-        };
+        const stream = runAgenticLoopStreaming(provider, req, agentOpts);
+        let result;
+        let hasContent = false;
+        let accumulatedContent = '';
+        let lastFinishReason: NormalisedLLMResponse['finish_reason'] = 'stop';
+        let lastUsage: NormalisedStreamEvent['usage'];
 
-        const result = await orchestrator.execute(normalised, memory, onProgress);
+        try {
+          while (true) {
+            const { value, done } = await stream.next();
+            if (done) {
+              result = value;
+              break;
+            }
 
-        // Stream synthesized content into the same text block
-        if (result.response.content) {
-          const text = result.response.content;
-          const chunkSize = 80;
-          for (let i = 0; i < text.length; i += chunkSize) {
-            writeAnthropicSSE(raw, 'content_block_delta', {
-              type: 'content_block_delta',
-              index: 0,
-              delta: { type: 'text_delta', text: text.slice(i, i + chunkSize) },
-            });
+            const event = value as NormalisedStreamEvent;
+            switch (event.type) {
+              case 'content_delta':
+                if (event.content) {
+                  hasContent = true;
+                  accumulatedContent += event.content;
+                  writeAnthropicSSE(raw, 'content_block_delta', {
+                    type: 'content_block_delta',
+                    index: blockIndex,
+                    delta: { type: 'text_delta', text: event.content },
+                  });
+                }
+                break;
+
+              case 'tool_call_delta':
+                if (event.tool_call) {
+                  // Close text block first
+                  writeAnthropicSSE(raw, 'content_block_stop', {
+                    type: 'content_block_stop',
+                    index: blockIndex,
+                  });
+                  blockIndex++;
+
+                  const tc = event.tool_call;
+                  const toolId = (tc.id ?? '').replace('call_', 'toolu_');
+                  let input: Record<string, unknown> = {};
+                  try { input = JSON.parse(tc.function?.arguments || '{}'); } catch { /* empty */ }
+
+                  writeAnthropicSSE(raw, 'content_block_start', {
+                    type: 'content_block_start',
+                    index: blockIndex,
+                    content_block: { type: 'tool_use', id: toolId, name: tc.function?.name, input: {} },
+                  });
+
+                  const jsonStr = JSON.stringify(input);
+                  writeAnthropicSSE(raw, 'content_block_delta', {
+                    type: 'content_block_delta',
+                    index: blockIndex,
+                    delta: { type: 'input_json_delta', partial_json: jsonStr },
+                  });
+
+                  writeAnthropicSSE(raw, 'content_block_stop', {
+                    type: 'content_block_stop',
+                    index: blockIndex,
+                  });
+                  blockIndex++;
+
+                  // Re-open a new text block for potential further content
+                  writeAnthropicSSE(raw, 'content_block_start', {
+                    type: 'content_block_start',
+                    index: blockIndex,
+                    content_block: { type: 'text', text: '' },
+                  });
+                }
+                break;
+
+              case 'done':
+                lastFinishReason = event.finish_reason ?? 'stop';
+                lastUsage = event.usage;
+                break;
+
+              case 'error':
+                writeAnthropicSSE(raw, 'content_block_delta', {
+                  type: 'content_block_delta',
+                  index: blockIndex,
+                  delta: { type: 'text_delta', text: `\n\n[Error: ${event.error}]` },
+                });
+                break;
+            }
           }
+        } catch (streamErr) {
+          const msg = streamErr instanceof Error ? streamErr.message : 'Stream error';
+          writeAnthropicSSE(raw, 'content_block_delta', {
+            type: 'content_block_delta',
+            index: blockIndex,
+            delta: { type: 'text_delta', text: `\n\n[Error: ${msg}]` },
+          });
         }
 
-        // Close text block
+        // Close last text block
         writeAnthropicSSE(raw, 'content_block_stop', {
           type: 'content_block_stop',
-          index: 0,
+          index: blockIndex,
         });
 
-        // Tool use blocks if any
-        if (result.response.tool_calls) {
-          let blockIndex = 1;
-          for (const tc of result.response.tool_calls) {
-            const toolId = tc.id.replace('call_', 'toolu_');
-            let input: Record<string, unknown> = {};
-            try { input = JSON.parse(tc.function.arguments || '{}'); } catch { /* empty */ }
-
-            writeAnthropicSSE(raw, 'content_block_start', {
-              type: 'content_block_start',
-              index: blockIndex,
-              content_block: { type: 'tool_use', id: toolId, name: tc.function.name, input: {} },
-            });
-
-            const jsonStr = JSON.stringify(input);
-            writeAnthropicSSE(raw, 'content_block_delta', {
-              type: 'content_block_delta',
-              index: blockIndex,
-              delta: { type: 'input_json_delta', partial_json: jsonStr },
-            });
-
-            writeAnthropicSSE(raw, 'content_block_stop', {
-              type: 'content_block_stop',
-              index: blockIndex,
-            });
-            blockIndex++;
-          }
-        }
-
-        // Finish
+        // message_delta + message_stop
         writeAnthropicSSE(raw, 'message_delta', {
           type: 'message_delta',
-          delta: { stop_reason: mapFinishReason(result.response.finish_reason), stop_sequence: null },
-          usage: { output_tokens: result.response.usage?.completion_tokens ?? 0 },
+          delta: { stop_reason: mapFinishReason(lastFinishReason), stop_sequence: null },
+          usage: { output_tokens: lastUsage?.completion_tokens ?? 0 },
         });
         writeAnthropicSSE(raw, 'message_stop', { type: 'message_stop' });
         raw.end();
+
+        // Extract and cache memory from accumulated content
+        if (accumulatedContent) {
+          const { memory } = stripMemoryBlock(accumulatedContent);
+          if (memory) {
+            saveSessionMemory(memoryCache, normalised.messages, memory);
+          }
+        }
 
         logger.logRequest({
           trace_id: traceId,
           timestamp: new Date().toISOString(),
           surface: 'anthropic',
-          route_decision: routeDecision,
-          orchestration: result.trace,
+          iterations: result?.iterations ?? 0,
+          tool_calls: result?.toolCalls ?? [],
           latency_ms: Date.now() - start,
         });
-
-        // Write mutated memory back to cache
-        memoryCache.update(sessionKey, memory, messageCount);
 
         return reply;
       }
 
-      // --- Non-streaming or direct path ---
-      let response;
-      let orchestrationTrace;
+      // Non-streaming path
+      const result = await runAgenticLoop(provider, req, agentOpts);
 
-      if (routeDecision.path === 'planner-executor') {
-        const result = await orchestrator.execute(normalised, memory);
-        response = result.response;
-        orchestrationTrace = result.trace;
-      } else if (routeDecision.provider === 'executor') {
-        // Direct executor path — compact messages with working memory
-        const compacted = compactMessages(normalised, memory);
-        compacted.tools = TOOL_DEFINITIONS;
-        compacted.tool_choice = 'auto';
-        response = await runAgenticDirect(executorProvider, compacted);
-      } else {
-        // Direct cloud path — compact messages with working memory
-        const compacted = compactMessages(normalised, memory);
-        response = await plannerProvider.createChatCompletion(compacted);
+      // Strip memory block from response, cache it
+      const { content: strippedContent, memory } = stripMemoryBlock(result.response.content);
+      if (memory) {
+        saveSessionMemory(memoryCache, normalised.messages, memory);
       }
+      result.response.content = strippedContent;
 
       logger.logRequest({
         trace_id: traceId,
         timestamp: new Date().toISOString(),
         surface: 'anthropic',
-        route_decision: routeDecision,
-        orchestration: orchestrationTrace,
+        iterations: result.iterations,
+        tool_calls: result.toolCalls,
         latency_ms: Date.now() - start,
       });
 
-      // Write mutated memory back to cache
-      memoryCache.update(sessionKey, memory, messageCount);
-
-      if (isStreaming) {
-        const raw = reply.raw;
-        raw.writeHead(200, {
-          'Content-Type': 'text/event-stream',
-          'Cache-Control': 'no-cache',
-          'Connection': 'keep-alive',
-        });
-        streamAnthropicResponse(raw, response, modelAlias);
-        raw.end();
-        return reply;
-      }
-
-      const anthropicResponse = toAnthropicMessages(response, modelAlias);
+      const anthropicResponse = toAnthropicMessages(result.response, modelAlias);
       return reply.send(anthropicResponse);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Internal server error';
@@ -404,7 +299,8 @@ export function registerAnthropicSurface(app: FastifyInstance, deps: AnthropicSu
         trace_id: traceId,
         timestamp: new Date().toISOString(),
         surface: 'anthropic',
-        route_decision: { path: 'direct', provider: 'executor', reason: 'error' },
+        iterations: 0,
+        tool_calls: [],
         latency_ms: Date.now() - start,
         error: message,
       });

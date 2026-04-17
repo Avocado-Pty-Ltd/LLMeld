@@ -1,92 +1,37 @@
 # LLMeld Configuration
 # Copy this file to config.yaml and edit as needed.
-# Only one cloud API key (OPENROUTER_API_KEY or ANTHROPIC_API_KEY) is required.
 
 gateway:
-  # Port for the OpenAI-compatible surface (used by OpenClaw, Hermes, web UIs)
-  openai_port: 8000
-  # Port for the Anthropic-compatible surface (used by Claude Code)
-  anthropic_port: 8001
+  # Port for both OpenAI and Anthropic surfaces
+  port: 8000
   # API key that downstream clients must send to authenticate with LLMeld
   api_key: "llmeld-local"
   # The model name clients will use — this is what shows up in /v1/models
-  model_alias: "llmeld/planner-executor"
+  model_alias: "llmeld/agent"
   # Enable detailed trace output in logs
   debug_traces: false
 
-providers:
-  # Cloud planner — the "brain" that decomposes complex tasks
-  planner:
-    # Options: "openrouter" | "anthropic" | "openai-compatible"
-    type: "openrouter"
-    # Model ID (use OpenRouter format for openrouter, Anthropic format for anthropic)
-    model: "anthropic/claude-sonnet-4-20250514"
-    # Name of the environment variable holding the API key (NOT the key itself)
-    api_key_env: "OPENROUTER_API_KEY"
-    # Base URL (only needed for openrouter or openai-compatible)
-    base_url: "https://openrouter.ai/api/v1"
-    # OpenRouter attribution headers (optional, helps with OpenRouter analytics)
-    attribution:
-      enabled: true
-      http_referer: "https://github.com/your-org/llmeld"
-      x_title: "LLMeld"
+# Single provider — the LLM that powers the agentic loop
+provider:
+  # Options: "openrouter" | "anthropic" | "openai-compatible" | "ollama"
+  type: "openrouter"
+  # Model ID (use OpenRouter format for openrouter, Anthropic format for anthropic)
+  model: "anthropic/claude-sonnet-4-20250514"
+  # Name of the environment variable holding the API key (NOT the key itself)
+  api_key_env: "OPENROUTER_API_KEY"
+  # Base URL (only needed for openrouter or openai-compatible)
+  base_url: "https://openrouter.ai/api/v1"
+  # OpenRouter attribution headers (optional)
+  attribution:
+    enabled: true
+    http_referer: "https://github.com/your-org/llmeld"
+    x_title: "LLMeld"
 
-  # Local executor — the "hands" that do the work on each step
-  executor:
-    # Options: "ollama" | "openai-compatible"
-    type: "ollama"
-    # Model to run locally via Ollama
-    model: "gemma3:4b"
-    # Ollama's OpenAI-compatible endpoint
-    base_url: "http://localhost:11434/v1"
-    # Ollama doesn't need a real key, but the OpenAI client requires one
-    api_key: "ollama"
-    # Max tokens per executor response
-    max_tokens: 2048
-    # Low temperature for deterministic code output
-    temperature: 0.1
-    # How long to wait for the local model before timing out (ms)
-    timeout_ms: 30000
-
-  # Fallback — used when local executor fails or for escalated steps
-  fallback:
-    type: "anthropic"
-    model: "claude-haiku-4-20250514"
-    api_key_env: "ANTHROPIC_API_KEY"
-    # null means use the default Anthropic API URL
-    base_url: null
-
-routing:
-  # Operating mode: "fast" | "balanced" | "best" | "cloud" | "local"
-  #   fast     — local-biased, skip planner unless forced
-  #   balanced — planner for complex tasks, local for simple ones (recommended)
-  #   best     — cloud-biased, use planner heavily
-  #   cloud    — route everything to cloud provider
-  #   local    — route everything locally, no cloud calls
-  default_mode: "balanced"
-  # Token count below this → simple path (direct to executor)
-  simple_threshold: 500
-  # Token count above this → complex path (planner/executor loop)
-  complex_threshold: 1500
-  # Max retries per step before escalating
-  max_retries: 2
-  # Enable heuristic task classifier (keyword + token analysis)
-  enable_task_classifier: true
-  # Block all cloud escalation (for privacy-sensitive environments)
-  privacy_mode: false
-  # Keywords that suggest a complex task (triggers planner path in balanced mode)
-  complex_keywords:
-    - "create"
-    - "build"
-    - "implement"
-    - "architect"
-    - "refactor"
-    - "design"
-  # Keywords that suggest a simple task (stays on direct path)
-  simple_keywords:
-    - "what is"
-    - "define"
-    - "explain briefly"
+agent:
+  # Maximum agentic loop iterations before forcing a final answer
+  max_iterations: 15
+  # Execute multiple tool calls in parallel when possible
+  parallel_tools: true
 
 logging:
   # Log level: "debug" | "info" | "warn" | "error"

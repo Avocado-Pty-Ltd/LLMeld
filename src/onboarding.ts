@@ -5,23 +5,12 @@ import { resolve } from 'node:path';
 import * as dotenv from 'dotenv';
 
 interface OnboardingConfig {
-  routingMode: string;
-  plannerProvider: string;
-  executorProvider: string;
-  plannerModel: string;
-  executorModel: string;
+  providerType: string;
+  model: string;
   apiKey: string;
   apiKeyType: string;
   loggingLevel: string;
-  privacyMode: boolean;
 }
-
-// Model validation patterns for different providers
-const MODEL_PATTERNS = {
-  openrouter: /^[a-z0-9]+\/[a-z0-9\-]+$/i,
-  anthropic: /^claude-\d+-[\w]+(-\d+)?$/i,
-  ollama: /^[\w\-]+$/i,
-};
 
 // Support both LLMELD_CONFIG (file path) and LLMELD_CONFIG_DIR (directory) conventions
 const CONFIG_DIR = process.env.LLMELD_CONFIG
@@ -35,7 +24,7 @@ const CONFIG_PATH = process.env.LLMELD_CONFIG
 
 export async function runOnboardingWizard(): Promise<void> {
   console.clear();
-  console.log(chalk.bold.cyan('\n🥑 Welcome to LLMeld!\n'));
+  console.log(chalk.bold.cyan('\n Welcome to LLMeld!\n'));
   console.log(chalk.gray('This wizard will help you set up LLMeld for your environment.\n'));
 
   const config = await collectConfiguration();
@@ -62,21 +51,7 @@ async function collectConfiguration(): Promise<OnboardingConfig> {
     }
   }
 
-  console.log(chalk.bold('\n1. Routing Configuration\n'));
-  const routingMode = await enquirer.prompt<{ mode: string }>({
-    type: 'select',
-    name: 'mode',
-    message: 'Which routing mode do you prefer?',
-    choices: [
-      { name: 'balanced', message: 'Balanced - Mix of cost savings and quality' },
-      { name: 'best', message: 'Best - Always use cloud models for best results' },
-      { name: 'fast', message: 'Fast - Prioritize local execution for speed' },
-      { name: 'cloud', message: 'Cloud-only - No local execution' },
-      { name: 'local', message: 'Local-only - No cloud usage (privacy mode)' },
-    ],
-  });
-
-  console.log(chalk.bold('\n2. Provider Configuration\n'));
+  console.log(chalk.bold('\n1. Provider Configuration\n'));
 
   let apiKeyType = 'openrouter';
   let apiKey = '';
@@ -88,13 +63,13 @@ async function collectConfiguration(): Promise<OnboardingConfig> {
     choices: [
       { name: 'openrouter', message: 'OpenRouter (supports multiple models)' },
       { name: 'anthropic', message: 'Anthropic (Claude)' },
-      { name: 'skip', message: 'Skip for now (local-only mode)' },
+      { name: 'ollama', message: 'Ollama (local models)' },
     ],
   });
 
   apiKeyType = apiKeyChoice.provider;
 
-  if (apiKeyChoice.provider !== 'skip') {
+  if (apiKeyChoice.provider !== 'ollama') {
     let validatedKey = '';
     let isValidKey = false;
 
@@ -105,14 +80,13 @@ async function collectConfiguration(): Promise<OnboardingConfig> {
         message: `Enter your ${apiKeyChoice.provider.toUpperCase()} API key:`,
       });
 
-      // Validate API key format
       if (!keyInput.key || keyInput.key.trim().length === 0) {
-        console.log(chalk.red('✗ API key cannot be empty. Please try again.'));
+        console.log(chalk.red('API key cannot be empty. Please try again.'));
         continue;
       }
 
       if (keyInput.key.length < 10) {
-        console.log(chalk.red('✗ API key seems too short. Please verify and try again.'));
+        console.log(chalk.red('API key seems too short. Please verify and try again.'));
         continue;
       }
 
@@ -123,59 +97,22 @@ async function collectConfiguration(): Promise<OnboardingConfig> {
     apiKey = validatedKey;
   }
 
-  console.log(chalk.bold('\n3. Model Selection\n'));
+  console.log(chalk.bold('\n2. Model Selection\n'));
 
-  let plannerModelValid = false;
-  let plannerModel = '';
+  const defaultModel = apiKeyType === 'anthropic'
+    ? 'claude-sonnet-4-20250514'
+    : apiKeyType === 'ollama'
+    ? 'llama2'
+    : 'anthropic/claude-sonnet-4-20250514';
 
-  while (!plannerModelValid) {
-    const plannerInput = await enquirer.prompt<{ model: string }>({
-      type: 'input',
-      name: 'model',
-      message: 'Cloud planner model (e.g., openai/gpt-4, claude-3-opus):',
-      initial: 'openai/gpt-4-turbo',
-    });
+  const modelInput = await enquirer.prompt<{ model: string }>({
+    type: 'input',
+    name: 'model',
+    message: `Model to use (e.g., ${defaultModel}):`,
+    initial: defaultModel,
+  });
 
-    // Validate planner model format
-    const pattern = apiKeyType === 'anthropic' 
-      ? MODEL_PATTERNS.anthropic 
-      : MODEL_PATTERNS.openrouter;
-
-    if (pattern.test(plannerInput.model)) {
-      plannerModel = plannerInput.model;
-      plannerModelValid = true;
-    } else {
-      console.log(
-        chalk.red(
-          `✗ Invalid model format. Expected format for ${apiKeyType}: ${
-            apiKeyType === 'anthropic' ? 'claude-3-opus' : 'provider/model-name'
-          }`
-        )
-      );
-    }
-  }
-
-  let executorModelValid = false;
-  let executorModel = '';
-
-  while (!executorModelValid) {
-    const executorInput = await enquirer.prompt<{ model: string }>({
-      type: 'input',
-      name: 'model',
-      message: 'Local executor model (must be available in Ollama, e.g., llama2, mistral):',
-      initial: 'llama2',
-    });
-
-    // Validate executor model format (Ollama models)
-    if (MODEL_PATTERNS.ollama.test(executorInput.model)) {
-      executorModel = executorInput.model;
-      executorModelValid = true;
-    } else {
-      console.log(chalk.red('✗ Invalid model name. Use only alphanumeric characters and hyphens.'));
-    }
-  }
-
-  console.log(chalk.bold('\n4. Logging Configuration\n'));
+  console.log(chalk.bold('\n3. Logging Configuration\n'));
 
   const loggingLevel = await enquirer.prompt<{ level: string }>({
     type: 'select',
@@ -189,25 +126,12 @@ async function collectConfiguration(): Promise<OnboardingConfig> {
     ],
   });
 
-  console.log(chalk.bold('\n5. Privacy Configuration\n'));
-
-  const privacyMode = await enquirer.prompt<{ privacy: boolean }>({
-    type: 'confirm',
-    name: 'privacy',
-    message: 'Enable strict privacy mode (no cloud escalation, only local execution)?',
-    initial: false,
-  });
-
   return {
-    routingMode: routingMode.mode,
-    plannerProvider: apiKeyType,
-    executorProvider: 'ollama',
-    plannerModel: plannerModel,
-    executorModel: executorModel,
+    providerType: apiKeyType,
+    model: modelInput.model,
     apiKey,
     apiKeyType,
     loggingLevel: loggingLevel.level,
-    privacyMode: privacyMode.privacy,
   };
 }
 
@@ -222,9 +146,9 @@ async function saveConfiguration(config: OnboardingConfig): Promise<void> {
 
     try {
       writeFileSync(CONFIG_PATH, yaml);
-      console.log(chalk.green(`\n✓ Configuration saved to ${CONFIG_PATH}`));
+      console.log(chalk.green(`\n Configuration saved to ${CONFIG_PATH}`));
     } catch (error) {
-      console.error(chalk.red(`✗ Failed to write configuration file: ${error}`));
+      console.error(chalk.red(`Failed to write configuration file: ${error}`));
       throw error;
     }
 
@@ -236,11 +160,9 @@ async function saveConfiguration(config: OnboardingConfig): Promise<void> {
 
       try {
         if (existsSync(envPath)) {
-          // Load existing .env file first
           dotenv.config({ path: envPath });
 
           let existing = readFileSync(envPath, 'utf-8');
-          // Remove existing key if present
           existing = existing
             .split('\n')
             .filter((line) => !line.startsWith(envKey + '='))
@@ -250,59 +172,48 @@ async function saveConfiguration(config: OnboardingConfig): Promise<void> {
         } else {
           writeFileSync(envPath, envContent);
         }
-        console.log(chalk.green(`✓ API key saved to ${envPath}`));
+        console.log(chalk.green(`API key saved to ${envPath}`));
       } catch (error) {
-        console.error(chalk.red(`✗ Failed to write .env file: ${error}`));
+        console.error(chalk.red(`Failed to write .env file: ${error}`));
         throw error;
       }
     }
   } catch (error) {
-    console.error(chalk.red(`\n✗ Configuration save failed: ${error}`));
+    console.error(chalk.red(`\nConfiguration save failed: ${error}`));
     process.exit(1);
   }
 }
 
 function generateConfigYaml(config: OnboardingConfig): string {
-  const plannerProvider =
-    config.apiKeyType === 'anthropic' ? 'anthropic' : 'openrouter';
+  const isOllama = config.providerType === 'ollama';
+  const apiKeyLine = isOllama
+    ? '  api_key: "ollama"'
+    : config.providerType === 'anthropic'
+    ? '  api_key_env: ANTHROPIC_API_KEY'
+    : '  api_key_env: OPENROUTER_API_KEY';
+
+  const baseUrlLine = isOllama
+    ? '  base_url: "http://localhost:11434/v1"'
+    : config.providerType === 'openrouter'
+    ? '  base_url: "https://openrouter.ai/api/v1"'
+    : '';
 
   return `# LLMeld Configuration
-# Generated by TUI Onboarding Wizard
+# Generated by Onboarding Wizard
 
 gateway:
-  openai_port: 8000
+  port: 8000
   api_key: llmeld-local
-  model_alias: llmeld/planner-executor
+  model_alias: llmeld/agent
 
-providers:
-  planner:
-    type: ${plannerProvider}
-    model: ${config.plannerModel}
-    ${
-      plannerProvider === 'anthropic'
-        ? 'api_key_env: ANTHROPIC_API_KEY'
-        : 'api_key_env: OPENROUTER_API_KEY'
-    }
-
-  executor:
-    type: ollama
-    model: ${config.executorModel}
-    base_url: "http://localhost:11434/v1"
-
-  fallback:
-    type: ${plannerProvider}
-    model: ${config.plannerModel}
-    ${
-      plannerProvider === 'anthropic'
-        ? 'api_key_env: ANTHROPIC_API_KEY'
-        : 'api_key_env: OPENROUTER_API_KEY'
-    }
-
-routing:
-  default_mode: ${config.routingMode}
-  privacy_mode: ${config.privacyMode}
-  simple_threshold: 500
-  complex_threshold: 1500
+provider:
+  type: ${config.providerType}
+  model: ${config.model}
+${apiKeyLine}
+${baseUrlLine ? baseUrlLine + '\n' : ''}
+agent:
+  max_iterations: 15
+  parallel_tools: true
 
 logging:
   level: ${config.loggingLevel}
@@ -313,31 +224,27 @@ logging:
 }
 
 function displayCompletionSummary(config: OnboardingConfig): void {
-  console.log(chalk.bold.green('\n✨ Setup Complete!\n'));
+  console.log(chalk.bold.green('\n Setup Complete!\n'));
 
   console.log(chalk.bold('Configuration Summary:'));
-  console.log(chalk.gray('─'.repeat(50)));
-  console.log(`  Routing Mode:      ${chalk.cyan(config.routingMode)}`);
-  console.log(`  Planner Model:     ${chalk.cyan(config.plannerModel)}`);
-  console.log(`  Executor Model:    ${chalk.cyan(config.executorModel)}`);
-  console.log(`  Logging Level:     ${chalk.cyan(config.loggingLevel)}`);
-  console.log(`  Privacy Mode:      ${chalk.cyan(config.privacyMode ? 'Enabled' : 'Disabled')}`);
-  console.log(chalk.gray('─'.repeat(50)));
+  console.log(chalk.gray('-'.repeat(50)));
+  console.log(`  Provider:    ${chalk.cyan(config.providerType)}`);
+  console.log(`  Model:       ${chalk.cyan(config.model)}`);
+  console.log(`  Log Level:   ${chalk.cyan(config.loggingLevel)}`);
+  console.log(chalk.gray('-'.repeat(50)));
 
-  console.log(chalk.bold('\n📚 Next Steps:\n'));
+  console.log(chalk.bold('\nNext Steps:\n'));
 
-  if (config.executorModel && config.executorModel !== 'skip') {
-    console.log(chalk.yellow('1. Ensure Ollama is running with your executor model:'));
-    console.log(chalk.gray(`   ollama pull ${config.executorModel}`));
+  if (config.providerType === 'ollama') {
+    console.log(chalk.yellow('1. Ensure Ollama is running with your model:'));
+    console.log(chalk.gray(`   ollama pull ${config.model}`));
     console.log(chalk.gray(`   ollama serve\n`));
   }
 
-  console.log(chalk.yellow('2. Start LLMeld:'));
+  console.log(chalk.yellow(`${config.providerType === 'ollama' ? '2' : '1'}. Start LLMeld:`));
   console.log(chalk.gray(`   pnpm dev\n`));
 
-  console.log(chalk.yellow('3. Test with a curl request:'));
-  const curlCommand = `curl http://localhost:8000/v1/chat/completions -H "Content-Type: application/json" -H "Authorization: Bearer llmeld-local" -d '{"model": "llmeld/planner-executor", "messages": [{"role": "user", "content": "Hello!"}]}'`;
+  const curlCommand = `curl http://localhost:8000/v1/chat/completions -H "Content-Type: application/json" -H "Authorization: Bearer llmeld-local" -d '{"model": "llmeld/agent", "messages": [{"role": "user", "content": "Hello!"}]}'`;
+  console.log(chalk.yellow(`${config.providerType === 'ollama' ? '3' : '2'}. Test with a curl request:`));
   console.log(chalk.gray(`   ${curlCommand}\n`));
-
-  console.log(chalk.blue('📖 For more information, see: https://github.com/Avocado-Pty-Ltd/LLMeld\n'));
 }
