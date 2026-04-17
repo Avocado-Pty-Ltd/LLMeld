@@ -56,18 +56,8 @@ export async function loadConfig(configPath?: string): Promise<LLMeldConfig> {
 
   const validated = result.data as unknown as LLMeldConfig;
 
-  // Resolve API keys from env vars
-  resolveApiKey(validated.providers.planner);
-  resolveApiKey(validated.providers.executor);
-  if (validated.providers.fallback) {
-    resolveApiKey(validated.providers.fallback);
-  }
-
-  // Override routing mode from env if set
-  const envMode = process.env.LLMELD_ROUTING_MODE;
-  if (envMode && ['fast', 'balanced', 'best', 'cloud', 'local'].includes(envMode)) {
-    validated.routing.default_mode = envMode as LLMeldConfig['routing']['default_mode'];
-  }
+  // Resolve API key from env var
+  resolveApiKey(validated.provider);
 
   return Object.freeze(validated) as LLMeldConfig;
 }
@@ -81,29 +71,14 @@ export function resolveProviderApiKey(provider: ProviderConfig): string {
 }
 
 export function printStartupSummary(config: LLMeldConfig): void {
-  const fallback = config.providers.fallback;
-  const pm = config.routing.planner_models;
-
-  let plannerDesc: string;
-  if (pm?.coding && pm?.general && pm.coding !== pm.general) {
-    plannerDesc = `coding: ${pm.coding}, general: ${pm.general}`;
-  } else if (pm?.coding || pm?.general) {
-    plannerDesc = `${config.providers.planner.type} (${pm.coding || pm.general})`;
-  } else {
-    plannerDesc = `${config.providers.planner.type} (${config.providers.planner.model})`;
-  }
-
-  // Dynamically size the table to fit content
   const rows: [string, string][] = [
-    ['OpenAI', `:${config.gateway.openai_port}`],
-    ['Anthropic', `:${config.gateway.anthropic_port}`],
-    ['Planner', plannerDesc],
-    ['Executor', `${config.providers.executor.type} (${config.providers.executor.model})`],
-    ['Fallback', fallback ? `${fallback.type} (${fallback.model})` : 'none'],
-    ['Mode', config.routing.default_mode],
+    ['Port', `:${config.gateway.port}`],
+    ['Provider', `${config.provider.type} (${config.provider.model})`],
+    ['Max Iterations', `${config.agent.max_iterations}`],
+    ['Parallel Tools', config.agent.parallel_tools ? 'yes' : 'no'],
   ];
 
-  const labelWidth = 13;
+  const labelWidth = 17;
   const valueWidth = Math.max(38, ...rows.map(([, v]) => v.length + 2));
   const lines = [
     `\u250c${'\u2500'.repeat(labelWidth)}\u252c${'\u2500'.repeat(valueWidth)}\u2510`,

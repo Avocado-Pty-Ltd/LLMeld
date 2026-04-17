@@ -2,6 +2,7 @@ import type { CloudProvider } from './base.js';
 import type {
   NormalisedLLMRequest,
   NormalisedLLMResponse,
+  NormalisedStreamEvent,
   NormalisedToolCall,
   NormalisedTokenUsage,
 } from '../types/normalised.js';
@@ -109,6 +110,119 @@ export class OpenAICompatibleProvider implements CloudProvider {
 
       const data = (await response.json()) as OpenAIResponse;
       return this.parseResponse(data);
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  async *createStreamingCompletion(req: NormalisedLLMRequest): AsyncIterable<NormalisedStreamEvent> {
+    const messages = this.buildMessages(req);
+    const body: Record<string, unknown> = {
+      model: this.model,
+      messages,
+      max_tokens: req.max_tokens ?? this.maxTokens ?? 4096,
+      temperature: req.temperature ?? this.temperature,
+      stream: true,
+    };
+
+    if (req.tools && req.tools.length > 0) {
+      body.tools = req.tools;
+      if (req.tool_choice) body.tool_choice = req.tool_choice;
+    }
+    if (req.stop) body.stop = req.stop;
+    if (req.top_p !== undefined) body.top_p = req.top_p;
+    if (req.response_format) body.response_format = req.response_format;
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+
+    try {
+      const response = await fetch(`${this.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${this.apiKey}`,
+          ...this.extraHeaders,
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const errorBody = await response.text();
+        throw new Error(`${this.name} API error ${response.status}: ${errorBody}`);
+      }
+
+      if (!response.body) {
+        throw new Error(`${this.name}: no response body for streaming`);
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() ?? '';
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed || !trimmed.startsWith('data: ')) continue;
+            const data = trimmed.slice(6);
+            if (data === '[DONE]') {
+              return;
+            }
+
+            try {
+              const parsed = JSON.parse(data);
+              const choice = parsed.choices?.[0];
+              if (!choice) continue;
+
+              const delta = choice.delta;
+              if (delta?.content) {
+                yield { type: 'content_delta', content: delta.content };
+              }
+
+              if (delta?.tool_calls) {
+                for (const tc of delta.tool_calls) {
+                  yield {
+                    type: 'tool_call_delta',
+                    tool_call: {
+                      id: tc.id,
+                      type: 'function',
+                      function: {
+                        name: tc.function?.name,
+                        arguments: tc.function?.arguments,
+                      },
+                    },
+                  };
+                }
+              }
+
+              if (choice.finish_reason) {
+                yield {
+                  type: 'done',
+                  finish_reason: this.mapFinishReason(choice.finish_reason),
+                  usage: parsed.usage ? {
+                    prompt_tokens: parsed.usage.prompt_tokens,
+                    completion_tokens: parsed.usage.completion_tokens,
+                    total_tokens: parsed.usage.total_tokens,
+                  } : undefined,
+                };
+              }
+            } catch {
+              // Skip unparseable lines
+            }
+          }
+        }
+      } finally {
+        reader.releaseLock();
+      }
     } finally {
       clearTimeout(timeout);
     }

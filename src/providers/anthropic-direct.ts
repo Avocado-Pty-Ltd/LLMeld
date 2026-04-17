@@ -2,6 +2,7 @@ import type { CloudProvider } from './base.js';
 import type {
   NormalisedLLMRequest,
   NormalisedLLMResponse,
+  NormalisedStreamEvent,
   NormalisedMessage,
   NormalisedToolCall,
   NormalisedTokenUsage,
@@ -104,6 +105,147 @@ export class AnthropicDirectProvider implements CloudProvider {
 
       const data = (await response.json()) as AnthropicResponse;
       return this.parseResponse(data);
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  async *createStreamingCompletion(req: NormalisedLLMRequest): AsyncIterable<NormalisedStreamEvent> {
+    const { system, messages } = this.buildMessages(req);
+
+    const body: Record<string, unknown> = {
+      model: this.model,
+      max_tokens: req.max_tokens ?? this.maxTokens,
+      messages,
+      stream: true,
+    };
+
+    if (system) body.system = system;
+    if (req.temperature !== undefined) body.temperature = req.temperature;
+    if (req.top_p !== undefined) body.top_p = req.top_p;
+    if (req.stop) body.stop_sequences = req.stop;
+
+    if (req.tools && req.tools.length > 0) {
+      body.tools = req.tools.map((t): AnthropicTool => ({
+        name: t.function.name,
+        description: t.function.description,
+        input_schema: (t.function.parameters as Record<string, unknown>) ?? { type: 'object', properties: {} },
+      }));
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+
+    try {
+      const response = await fetch(`${this.baseUrl}/v1/messages`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': this.apiKey,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const errorBody = await response.text();
+        throw new Error(`Anthropic API error ${response.status}: ${errorBody}`);
+      }
+
+      if (!response.body) {
+        throw new Error('Anthropic: no response body for streaming');
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      // Track current tool call being accumulated
+      let currentToolId: string | undefined;
+      let currentToolName: string | undefined;
+      let currentToolJson = '';
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() ?? '';
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed.startsWith('data: ')) continue;
+
+            try {
+              const data = JSON.parse(trimmed.slice(6));
+
+              switch (data.type) {
+                case 'content_block_start':
+                  if (data.content_block?.type === 'tool_use') {
+                    currentToolId = data.content_block.id;
+                    currentToolName = data.content_block.name;
+                    currentToolJson = '';
+                  }
+                  break;
+
+                case 'content_block_delta':
+                  if (data.delta?.type === 'text_delta' && data.delta.text) {
+                    yield { type: 'content_delta', content: data.delta.text };
+                  } else if (data.delta?.type === 'input_json_delta' && data.delta.partial_json) {
+                    currentToolJson += data.delta.partial_json;
+                  }
+                  break;
+
+                case 'content_block_stop':
+                  if (currentToolId && currentToolName) {
+                    yield {
+                      type: 'tool_call_delta',
+                      tool_call: {
+                        id: `call_${currentToolId.replace('toolu_', '')}`,
+                        type: 'function',
+                        function: {
+                          name: currentToolName,
+                          arguments: currentToolJson || '{}',
+                        },
+                      },
+                    };
+                    currentToolId = undefined;
+                    currentToolName = undefined;
+                    currentToolJson = '';
+                  }
+                  break;
+
+                case 'message_delta':
+                  yield {
+                    type: 'done',
+                    finish_reason: this.mapStopReason(data.delta?.stop_reason),
+                    usage: data.usage ? {
+                      prompt_tokens: 0,
+                      completion_tokens: data.usage.output_tokens ?? 0,
+                      total_tokens: data.usage.output_tokens ?? 0,
+                    } : undefined,
+                  };
+                  break;
+
+                case 'message_start':
+                  // Could extract input tokens usage here if needed
+                  break;
+
+                case 'error':
+                  yield { type: 'error', error: data.error?.message ?? 'Unknown streaming error' };
+                  return;
+              }
+            } catch {
+              // Skip unparseable lines
+            }
+          }
+        }
+      } finally {
+        reader.releaseLock();
+      }
     } finally {
       clearTimeout(timeout);
     }
